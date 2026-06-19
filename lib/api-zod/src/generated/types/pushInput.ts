@@ -5,9 +5,6 @@
  * Base44 to GitHub push tool API
  * OpenAPI spec version: 0.1.0
  */
-export interface HealthStatus {
-  status: string;
-}
 
 export interface PushInput {
   /** The Base44 App ID */
@@ -25,31 +22,3 @@ export interface PushInput {
   /** Commit message */
   commitMessage?: string;
 }
-
-export interface PushResult {
-  success: boolean;
-  filesCount: number;
-  commitUrl: string;
-  message: string;
-}
-
-export interface PreviewInput {
-  base44AppId: string;
-  base44ApiKey: string;
-}
-
-export interface FileEntry {
-  path: string;
-  size: number;
-  type?: string;
-}
-
-export interface PreviewResult {
-  appName: string;
-  files: FileEntry[];
-}
-
-export interface ErrorResponse {
-  error: string;
-}
-

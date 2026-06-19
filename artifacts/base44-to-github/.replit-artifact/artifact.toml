@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Base44 to GitHub"
+version = "1.0.0"
+id = "artifacts/base44-to-github"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22191
+
+[services.development]
+run = "pnpm --filter @workspace/base44-to-github run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/base44-to-github", "run", "build" ]
+publicDir = "artifacts/base44-to-github/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22191"
+BASE_PATH = "/"

@@ -1,15 +1,16 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Base44 to GitHub push tool API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: push
+    description: Push Base44 code to GitHub
 paths:
   /healthz:
     get:
@@ -24,6 +25,68 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /push:
+    post:
+      operationId: pushToGithub
+      tags: [push]
+      summary: Push Base44 app code to GitHub
+      description: Fetches code from Base44 using API credentials and pushes it to a GitHub repository
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushInput"
+      responses:
+        "200":
+          description: Push succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushResult"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /preview:
+    post:
+      operationId: previewBase44Files
+      tags: [push]
+      summary: Preview files that would be pushed
+      description: Fetches the file list from Base44 without pushing to GitHub
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreviewInput"
+      responses:
+        "200":
+          description: File list fetched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreviewResult"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +96,92 @@ components:
           type: string
       required:
         - status
-
+    PushInput:
+      type: object
+      required:
+        - base44AppId
+        - base44ApiKey
+        - githubToken
+        - githubOwner
+        - githubRepo
+      properties:
+        base44AppId:
+          type: string
+          description: The Base44 App ID
+        base44ApiKey:
+          type: string
+          description: The Base44 API Key
+        githubToken:
+          type: string
+          description: GitHub Personal Access Token
+        githubOwner:
+          type: string
+          description: GitHub repository owner (username or org)
+        githubRepo:
+          type: string
+          description: GitHub repository name
+        branch:
+          type: string
+          description: Target branch (defaults to main)
+          default: main
+        commitMessage:
+          type: string
+          description: Commit message
+          default: "chore: sync from Base44"
+    PushResult:
+      type: object
+      required:
+        - success
+        - filesCount
+        - commitUrl
+        - message
+      properties:
+        success:
+          type: boolean
+        filesCount:
+          type: integer
+        commitUrl:
+          type: string
+        message:
+          type: string
+    PreviewInput:
+      type: object
+      required:
+        - base44AppId
+        - base44ApiKey
+      properties:
+        base44AppId:
+          type: string
+        base44ApiKey:
+          type: string
+    PreviewResult:
+      type: object
+      required:
+        - files
+        - appName
+      properties:
+        appName:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileEntry"
+    FileEntry:
+      type: object
+      required:
+        - path
+        - size
+      properties:
+        path:
+          type: string
+        size:
+          type: integer
+        type:
+          type: string
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string

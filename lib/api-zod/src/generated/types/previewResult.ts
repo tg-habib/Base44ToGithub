@@ -5,7 +5,9 @@
  * Base44 to GitHub push tool API
  * OpenAPI spec version: 0.1.0
  */
+import type { FileEntry } from './fileEntry';
 
-export interface HealthStatus {
-  status: string;
+export interface PreviewResult {
+  appName: string;
+  files: FileEntry[];
 }
