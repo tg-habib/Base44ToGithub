@@ -38,14 +38,17 @@ import type { PreviewResult } from "@workspace/api-client-react/src/generated/ap
 
 /* ── Zod schemas ── */
 
-const ejectSchema = z.object({
+const ejectStep1Schema = z.object({
   base44AppId: z.string().min(1, "App ID is required"),
   base44ApiKey: z.string().min(1, "API Key is required"),
+});
+
+const ejectStep2Schema = z.object({
   githubToken: z.string().min(1, "Personal Access Token is required"),
   githubOwner: z.string().min(1, "Owner or org name is required"),
   githubRepo: z.string().min(1, "Repository name is required"),
-  branch: z.string().min(1).default("main"),
-  commitMessage: z.string().min(1).default("feat: eject from Base44"),
+  branch: z.string().min(1, "Branch is required").default("main"),
+  commitMessage: z.string().min(1, "Commit message is required").default("feat: eject from Base44"),
 });
 
 const previewSchema = z.object({
@@ -187,27 +190,33 @@ export default function Home() {
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("eject");
 
-  /* ── Eject state ── */
+  /* ── Eject state — two separate forms, one per step ── */
   const [ejectStep, setEjectStep] = useState<1 | 2>(1);
-  const [ejectCreds, setEjectCreds] = useState<z.infer<typeof ejectSchema> | null>(null);
+  const [ejectStep1Data, setEjectStep1Data] = useState<z.infer<typeof ejectStep1Schema> | null>(null);
   const [ejectResult, setEjectResult] = useState<{ url: string; count: number; logs?: string } | null>(null);
 
-  const ejectForm = useForm<z.infer<typeof ejectSchema>>({
-    resolver: zodResolver(ejectSchema),
-    defaultValues: { base44AppId: "", base44ApiKey: "", githubToken: "", githubOwner: "", githubRepo: "", branch: "main", commitMessage: "feat: eject from Base44" },
+  const ejectForm1 = useForm<z.infer<typeof ejectStep1Schema>>({
+    resolver: zodResolver(ejectStep1Schema),
+    defaultValues: { base44AppId: "", base44ApiKey: "" },
+  });
+
+  const ejectForm2 = useForm<z.infer<typeof ejectStep2Schema>>({
+    resolver: zodResolver(ejectStep2Schema),
+    defaultValues: { githubToken: "", githubOwner: "", githubRepo: "", branch: "main", commitMessage: "feat: eject from Base44" },
   });
 
   const ejectMutation = useEjectAndPush();
 
-  const onEjectStep1 = (values: z.infer<typeof ejectSchema>) => {
-    setEjectCreds(values);
+  const onEjectStep1Submit = (values: z.infer<typeof ejectStep1Schema>) => {
+    setEjectStep1Data(values);
     setEjectStep(2);
   };
 
-  const onEjectSubmit = () => {
-    if (!ejectCreds) return;
+  const onEjectStep2Submit = (values: z.infer<typeof ejectStep2Schema>) => {
+    if (!ejectStep1Data) return;
+    const payload = { ...ejectStep1Data, ...values };
     ejectMutation.mutate(
-      { data: ejectCreds },
+      { data: payload },
       {
         onSuccess: (data) => {
           if (data.success) {
@@ -222,6 +231,15 @@ export default function Home() {
         },
       }
     );
+  };
+
+  const resetEject = () => {
+    setEjectResult(null);
+    setEjectStep(1);
+    setEjectStep1Data(null);
+    ejectForm1.reset();
+    ejectForm2.reset();
+    ejectMutation.reset();
   };
 
   /* ── Metadata push state ── */
@@ -309,7 +327,7 @@ export default function Home() {
         </div>
 
         {/* ═══════════════════════════════════════════════
-            TAB: EJECT FULL CODE (via base44 CLI on server)
+            TAB: EJECT FULL CODE
         ═══════════════════════════════════════════════ */}
         {tab === "eject" && (
           <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -319,7 +337,7 @@ export default function Home() {
               <div>
                 <p className="text-sm font-semibold text-foreground">How this works</p>
                 <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                  This tab runs <code className="bg-muted px-1 rounded">npx base44 eject</code> on the server using your API key, collects all your React/JSX source files, and pushes them to GitHub in one commit.
+                  Runs <code className="bg-muted px-1 rounded">npx base44 eject</code> on the server using your API key, collects all React/JSX source files, and pushes them to GitHub in one commit.
                   Takes ~30–90 seconds. <strong className="text-foreground">Free — no paid Base44 plan required.</strong>
                 </p>
               </div>
@@ -350,17 +368,16 @@ export default function Home() {
                       <pre className="mt-2 text-xs bg-muted rounded-lg p-3 overflow-auto max-h-40 whitespace-pre-wrap text-muted-foreground">{ejectResult.logs}</pre>
                     </details>
                   )}
-                  <button
-                    onClick={() => { setEjectResult(null); setEjectStep(1); ejectForm.reset(); ejectMutation.reset(); }}
-                    className="text-xs text-muted-foreground hover:text-foreground transition-colors mt-1"
-                  >Eject another app</button>
+                  <button onClick={resetEject} className="text-xs text-muted-foreground hover:text-foreground transition-colors mt-1">
+                    Eject another app
+                  </button>
                 </div>
               </Card>
             ) : (
               <>
                 <StepBadge current={ejectStep} />
 
-                {/* Step 1: All credentials in one form */}
+                {/* ── Step 1: Base44 credentials ── */}
                 {ejectStep === 1 && (
                   <Card>
                     <div className="p-5 border-b border-border">
@@ -370,27 +387,33 @@ export default function Home() {
                         </div>
                         <div>
                           <h2 className="font-semibold text-foreground">Base44 credentials</h2>
-                          <p className="text-sm text-muted-foreground mt-0.5">Found under <strong>API → Documentation</strong> in your Base44 dashboard.</p>
+                          <p className="text-sm text-muted-foreground mt-0.5">
+                            Found under <strong>API → Documentation</strong> in your Base44 dashboard.
+                          </p>
                         </div>
                       </div>
                     </div>
                     <div className="p-5">
-                      <Form {...ejectForm}>
-                        <form id="eject-form-1" onSubmit={ejectForm.handleSubmit(onEjectStep1)} className="space-y-5">
-                          <FormField control={ejectForm.control} name="base44AppId" render={({ field }) => (
+                      <Form {...ejectForm1}>
+                        <form
+                          id="eject-step1-form"
+                          onSubmit={ejectForm1.handleSubmit(onEjectStep1Submit)}
+                          className="space-y-5"
+                        >
+                          <FormField control={ejectForm1.control} name="base44AppId" render={({ field }) => (
                             <FormItem>
                               <div className="flex items-center justify-between">
                                 <FormLabel>App ID</FormLabel>
                                 <HelpLink href="https://app.base44.com">Find in dashboard</HelpLink>
                               </div>
                               <FormControl>
-                                <Input placeholder="5cd25d4561300955d4b9509e7" className="font-mono text-sm" {...field} />
+                                <Input placeholder="69dff787f3edfb6f77adcfb0" className="font-mono text-sm" {...field} />
                               </FormControl>
                               <FieldHint>The alphanumeric ID shown in the SDK snippet (also visible in your editor URL).</FieldHint>
                               <FormMessage />
                             </FormItem>
                           )} />
-                          <FormField control={ejectForm.control} name="base44ApiKey" render={({ field }) => (
+                          <FormField control={ejectForm1.control} name="base44ApiKey" render={({ field }) => (
                             <FormItem>
                               <div className="flex items-center justify-between">
                                 <FormLabel>API Key</FormLabel>
@@ -411,14 +434,14 @@ export default function Home() {
                         <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                         <span>Credentials are never stored — only used for this request.</span>
                       </div>
-                      <Button type="submit" form="eject-form-1" className="shrink-0">
+                      <Button type="submit" form="eject-step1-form" className="shrink-0">
                         Next <ArrowRight className="ml-2 h-4 w-4" />
                       </Button>
                     </div>
                   </Card>
                 )}
 
-                {/* Step 2: GitHub destination + run */}
+                {/* ── Step 2: GitHub destination ── */}
                 {ejectStep === 2 && (
                   <Card>
                     <div className="p-5 border-b border-border">
@@ -433,9 +456,13 @@ export default function Home() {
                       </div>
                     </div>
                     <div className="p-5 space-y-5">
-                      <Form {...ejectForm}>
-                        <form id="eject-form-2" className="space-y-5">
-                          <FormField control={ejectForm.control} name="githubToken" render={({ field }) => (
+                      <Form {...ejectForm2}>
+                        <form
+                          id="eject-step2-form"
+                          onSubmit={ejectForm2.handleSubmit(onEjectStep2Submit)}
+                          className="space-y-5"
+                        >
+                          <FormField control={ejectForm2.control} name="githubToken" render={({ field }) => (
                             <FormItem>
                               <div className="flex items-center justify-between">
                                 <FormLabel>Personal Access Token</FormLabel>
@@ -449,7 +476,7 @@ export default function Home() {
                             </FormItem>
                           )} />
                           <div className="grid grid-cols-2 gap-4">
-                            <FormField control={ejectForm.control} name="githubOwner" render={({ field }) => (
+                            <FormField control={ejectForm2.control} name="githubOwner" render={({ field }) => (
                               <FormItem>
                                 <FormLabel>Owner</FormLabel>
                                 <FormControl><Input placeholder="your-username" {...field} /></FormControl>
@@ -457,7 +484,7 @@ export default function Home() {
                                 <FormMessage />
                               </FormItem>
                             )} />
-                            <FormField control={ejectForm.control} name="githubRepo" render={({ field }) => (
+                            <FormField control={ejectForm2.control} name="githubRepo" render={({ field }) => (
                               <FormItem>
                                 <FormLabel>Repository</FormLabel>
                                 <FormControl><Input placeholder="my-base44-app" {...field} /></FormControl>
@@ -467,14 +494,14 @@ export default function Home() {
                             )} />
                           </div>
                           <div className="grid grid-cols-2 gap-4">
-                            <FormField control={ejectForm.control} name="branch" render={({ field }) => (
+                            <FormField control={ejectForm2.control} name="branch" render={({ field }) => (
                               <FormItem>
                                 <FormLabel>Branch</FormLabel>
                                 <FormControl><Input placeholder="main" {...field} /></FormControl>
                                 <FormMessage />
                               </FormItem>
                             )} />
-                            <FormField control={ejectForm.control} name="commitMessage" render={({ field }) => (
+                            <FormField control={ejectForm2.control} name="commitMessage" render={({ field }) => (
                               <FormItem>
                                 <FormLabel>Commit message</FormLabel>
                                 <FormControl><Input placeholder="feat: eject from Base44" {...field} /></FormControl>
@@ -486,7 +513,7 @@ export default function Home() {
                       </Form>
 
                       {ejectMutation.isPending && (
-                        <div className="flex flex-col items-center gap-3 py-4 text-center">
+                        <div className="flex flex-col items-center gap-3 py-4 text-center border border-primary/20 bg-primary/5 rounded-xl">
                           <Loader2 className="h-7 w-7 animate-spin text-primary" />
                           <div>
                             <p className="text-sm font-medium text-foreground">Ejecting your app…</p>
@@ -502,9 +529,8 @@ export default function Home() {
                         <ArrowLeft className="mr-2 h-4 w-4" /> Back
                       </Button>
                       <Button
-                        onClick={() => {
-                          ejectForm.handleSubmit(() => onEjectSubmit())();
-                        }}
+                        type="submit"
+                        form="eject-step2-form"
                         disabled={ejectMutation.isPending}
                       >
                         {ejectMutation.isPending
@@ -530,7 +556,7 @@ export default function Home() {
         )}
 
         {/* ═══════════════════════════════════════════════
-            TAB: MANUAL METHODS (Chrome ext + manual copy)
+            TAB: MANUAL METHODS
         ═══════════════════════════════════════════════ */}
         {tab === "manual" && (
           <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -616,7 +642,8 @@ git push -u origin main`} />
               <AlertCircle className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
               <p className="text-sm text-blue-800 leading-relaxed">
                 This pushes your app's <strong>entity schemas, TypeScript types, OpenAPI spec, and SDK config</strong>.
-                For full JSX source code use <button onClick={() => setTab("eject")} className="underline font-semibold cursor-pointer">Eject Full Code</button>.
+                For full JSX source code use{" "}
+                <button onClick={() => setTab("eject")} className="underline font-semibold cursor-pointer">Eject Full Code</button>.
               </p>
             </div>
 
@@ -635,14 +662,14 @@ git push -u origin main`} />
                 </div>
                 <div className="p-5">
                   <Form {...form1}>
-                    <form id="form-1" onSubmit={form1.handleSubmit(onPreviewSubmit)} className="space-y-5">
+                    <form id="meta-form-1" onSubmit={form1.handleSubmit(onPreviewSubmit)} className="space-y-5">
                       <FormField control={form1.control} name="base44AppId" render={({ field }) => (
                         <FormItem>
                           <div className="flex items-center justify-between">
                             <FormLabel>App ID</FormLabel>
                             <HelpLink href="https://app.base44.com">Find in dashboard</HelpLink>
                           </div>
-                          <FormControl><Input placeholder="5cd25d4561300955d4b9509e7" className="font-mono text-sm" {...field} /></FormControl>
+                          <FormControl><Input placeholder="69dff787f3edfb6f77adcfb0" className="font-mono text-sm" {...field} /></FormControl>
                           <FormMessage />
                         </FormItem>
                       )} />
@@ -667,8 +694,10 @@ git push -u origin main`} />
                   </Form>
                 </div>
                 <div className="p-4 border-t border-border bg-muted/30 rounded-b-xl flex justify-end">
-                  <Button type="submit" form="form-1" disabled={previewMutation.isPending}>
-                    {previewMutation.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Connecting…</> : <>Preview files <ArrowRight className="ml-2 h-4 w-4" /></>}
+                  <Button type="submit" form="meta-form-1" disabled={previewMutation.isPending}>
+                    {previewMutation.isPending
+                      ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Connecting…</>
+                      : <>Preview files <ArrowRight className="ml-2 h-4 w-4" /></>}
                   </Button>
                 </div>
               </Card>
@@ -707,7 +736,7 @@ git push -u origin main`} />
                   </div>
                   <div className="p-5">
                     <Form {...form2}>
-                      <form id="form-2" onSubmit={form2.handleSubmit(onPushSubmit)} className="space-y-5">
+                      <form id="meta-form-2" onSubmit={form2.handleSubmit(onPushSubmit)} className="space-y-5">
                         <FormField control={form2.control} name="githubToken" render={({ field }) => (
                           <FormItem>
                             <div className="flex items-center justify-between">
@@ -739,8 +768,10 @@ git push -u origin main`} />
                   </div>
                   <div className="p-4 border-t border-border bg-muted/30 rounded-b-xl flex items-center justify-between gap-3">
                     <Button variant="outline" onClick={() => setMetaStep(1)}><ArrowLeft className="mr-2 h-4 w-4" />Back</Button>
-                    <Button type="submit" form="form-2" disabled={pushMutation.isPending || (previewData?.files.length === 0)}>
-                      {pushMutation.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Pushing…</> : <>Push to GitHub <ArrowRight className="ml-2 h-4 w-4" /></>}
+                    <Button type="submit" form="meta-form-2" disabled={pushMutation.isPending || (previewData?.files.length === 0)}>
+                      {pushMutation.isPending
+                        ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Pushing…</>
+                        : <>Push to GitHub <ArrowRight className="ml-2 h-4 w-4" /></>}
                     </Button>
                   </div>
                 </Card>
@@ -761,8 +792,10 @@ git push -u origin main`} />
                     className="inline-flex items-center gap-2.5 px-5 py-2.5 bg-foreground text-background rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">
                     <Github className="h-4 w-4" />View commit on GitHub<ExternalLink className="h-3.5 w-3.5 opacity-60" />
                   </a>
-                  <button onClick={() => { setMetaStep(1); setPushResult(null); setPreviewData(null); form1.reset(); form2.reset(); previewMutation.reset(); pushMutation.reset(); }}
-                    className="text-xs text-muted-foreground hover:text-foreground transition-colors">Push another app</button>
+                  <button
+                    onClick={() => { setMetaStep(1); setPushResult(null); setPreviewData(null); form1.reset(); form2.reset(); previewMutation.reset(); pushMutation.reset(); }}
+                    className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >Push another app</button>
                 </div>
               </Card>
             )}
