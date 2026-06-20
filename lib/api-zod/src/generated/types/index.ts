@@ -6,6 +6,8 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './ejectInput';
+export * from './ejectResult';
 export * from './errorResponse';
 export * from './fileEntry';
 export * from './healthStatus';

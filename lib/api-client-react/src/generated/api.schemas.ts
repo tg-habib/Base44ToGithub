@@ -53,6 +53,32 @@ export interface PreviewResult {
   files: FileEntry[];
 }
 
+export interface EjectInput {
+  /** The Base44 App ID (from the editor URL or SDK snippet) */
+  base44AppId: string;
+  /** The Base44 API Key — used as BASE44_API_KEY for the CLI */
+  base44ApiKey: string;
+  /** GitHub Personal Access Token with repo write access */
+  githubToken: string;
+  /** GitHub repository owner (username or org) */
+  githubOwner: string;
+  /** GitHub repository name (must already exist) */
+  githubRepo: string;
+  /** Target branch */
+  branch?: string;
+  /** Commit message */
+  commitMessage?: string;
+}
+
+export interface EjectResult {
+  success: boolean;
+  filesCount: number;
+  commitUrl: string;
+  message: string;
+  /** CLI output logs for debugging */
+  logs?: string;
+}
+
 export interface ErrorResponse {
   error: string;
 }

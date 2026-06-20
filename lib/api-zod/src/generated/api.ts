@@ -63,3 +63,30 @@ export const PreviewBase44FilesResponse = zod.object({
 })
 
 
+/**
+ * Runs `npx base44 eject` in a temp directory using the provided API key, collects all generated files (JSX, CSS, JSON, etc.), and pushes them to the specified GitHub repository in a single commit.
+
+ * @summary Eject full Base44 source code and push to GitHub
+ */
+export const ejectAndPushBodyBranchDefault = `main`;
+export const ejectAndPushBodyCommitMessageDefault = `feat: eject from Base44`;
+
+export const EjectAndPushBody = zod.object({
+  "base44AppId": zod.string().describe('The Base44 App ID (from the editor URL or SDK snippet)'),
+  "base44ApiKey": zod.string().describe('The Base44 API Key — used as BASE44_API_KEY for the CLI'),
+  "githubToken": zod.string().describe('GitHub Personal Access Token with repo write access'),
+  "githubOwner": zod.string().describe('GitHub repository owner (username or org)'),
+  "githubRepo": zod.string().describe('GitHub repository name (must already exist)'),
+  "branch": zod.string().default(ejectAndPushBodyBranchDefault).describe('Target branch'),
+  "commitMessage": zod.string().default(ejectAndPushBodyCommitMessageDefault).describe('Commit message')
+})
+
+export const EjectAndPushResponse = zod.object({
+  "success": zod.boolean(),
+  "filesCount": zod.number(),
+  "commitUrl": zod.string(),
+  "message": zod.string(),
+  "logs": zod.string().optional().describe('CLI output logs for debugging')
+})
+
+

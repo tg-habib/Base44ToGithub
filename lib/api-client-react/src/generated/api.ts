@@ -20,6 +20,8 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  EjectInput,
+  EjectResult,
   ErrorResponse,
   HealthStatus,
   PreviewInput,
@@ -260,5 +262,78 @@ export const usePreviewBase44Files = <TError = ErrorType<ErrorResponse>,
         TContext
       > => {
       return useMutation(getPreviewBase44FilesMutationOptions(options));
+    }
+
+export const getEjectAndPushUrl = () => {
+
+
+
+
+  return `/api/eject`
+}
+
+/**
+ * Runs `npx base44 eject` in a temp directory using the provided API key, collects all generated files (JSX, CSS, JSON, etc.), and pushes them to the specified GitHub repository in a single commit.
+
+ * @summary Eject full Base44 source code and push to GitHub
+ */
+export const ejectAndPush = async (ejectInput: EjectInput, options?: RequestInit): Promise<EjectResult> => {
+
+  return customFetch<EjectResult>(getEjectAndPushUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      ejectInput,)
+  }
+);}
+
+
+
+
+export const getEjectAndPushMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof ejectAndPush>>, TError,{data: BodyType<EjectInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof ejectAndPush>>, TError,{data: BodyType<EjectInput>}, TContext> => {
+
+const mutationKey = ['ejectAndPush'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof ejectAndPush>>, {data: BodyType<EjectInput>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  ejectAndPush(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type EjectAndPushMutationResult = NonNullable<Awaited<ReturnType<typeof ejectAndPush>>>
+    export type EjectAndPushMutationBody = BodyType<EjectInput>
+    export type EjectAndPushMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Eject full Base44 source code and push to GitHub
+ */
+export const useEjectAndPush = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof ejectAndPush>>, TError,{data: BodyType<EjectInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof ejectAndPush>>,
+        TError,
+        {data: BodyType<EjectInput>},
+        TContext
+      > => {
+      return useMutation(getEjectAndPushMutationOptions(options));
     }
 

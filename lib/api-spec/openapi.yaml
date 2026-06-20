@@ -11,6 +11,8 @@ tags:
     description: Health operations
   - name: push
     description: Push Base44 code to GitHub
+  - name: eject
+    description: Eject full Base44 source code via CLI and push to GitHub
 paths:
   /healthz:
     get:
@@ -83,6 +85,40 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /eject:
+    post:
+      operationId: ejectAndPush
+      tags: [eject]
+      summary: Eject full Base44 source code and push to GitHub
+      description: >
+        Runs `npx base44 eject` in a temp directory using the provided API key,
+        collects all generated files (JSX, CSS, JSON, etc.), and pushes them to
+        the specified GitHub repository in a single commit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EjectInput"
+      responses:
+        "200":
+          description: Eject and push succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EjectResult"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Eject or push failed
           content:
             application/json:
               schema:
@@ -184,6 +220,57 @@ components:
           type: integer
         type:
           type: string
+    EjectInput:
+      type: object
+      required:
+        - base44AppId
+        - base44ApiKey
+        - githubToken
+        - githubOwner
+        - githubRepo
+      properties:
+        base44AppId:
+          type: string
+          description: The Base44 App ID (from the editor URL or SDK snippet)
+        base44ApiKey:
+          type: string
+          description: The Base44 API Key — used as BASE44_API_KEY for the CLI
+        githubToken:
+          type: string
+          description: GitHub Personal Access Token with repo write access
+        githubOwner:
+          type: string
+          description: GitHub repository owner (username or org)
+        githubRepo:
+          type: string
+          description: GitHub repository name (must already exist)
+        branch:
+          type: string
+          description: Target branch
+          default: main
+        commitMessage:
+          type: string
+          description: Commit message
+          default: "feat: eject from Base44"
+    EjectResult:
+      type: object
+      required:
+        - success
+        - filesCount
+        - commitUrl
+        - message
+      properties:
+        success:
+          type: boolean
+        filesCount:
+          type: integer
+        commitUrl:
+          type: string
+        message:
+          type: string
+        logs:
+          type: string
+          description: CLI output logs for debugging
     ErrorResponse:
       type: object
       required:
