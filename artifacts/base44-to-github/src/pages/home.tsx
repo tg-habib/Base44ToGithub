@@ -346,11 +346,34 @@ export default function Home() {
     defaultValues: { githubToken: "", githubOwner: "", githubRepo: "", branch: "main", commitMessage: "feat: eject from Base44" },
   });
 
-  /* ── GitHub OAuth Device Flow ── */
-  const [ghSession, setGhSession] = useState<{ token: string; login: string; avatar_url: string } | null>(null);
-  const [deviceFlow, setDeviceFlow] = useState<{ user_code: string; verification_uri: string; device_code: string; interval: number } | null>(null);
-  const [devicePolling, setDevicePolling] = useState(false);
+  /* ── GitHub OAuth Device Flow — state backed by sessionStorage so it
+        survives page reloads when the user switches apps to approve on GitHub ── */
+  type GhSession = { token: string; login: string; avatar_url: string };
+  type DeviceFlowState = { user_code: string; verification_uri: string; device_code: string; interval: number };
+
+  function readStorage<T>(key: string): T | null {
+    try { return JSON.parse(sessionStorage.getItem(key) ?? "null") as T; } catch { return null; }
+  }
+  function writeStorage(key: string, value: unknown) {
+    try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* noop */ }
+  }
+  function clearStorage(key: string) {
+    try { sessionStorage.removeItem(key); } catch { /* noop */ }
+  }
+
+  const [ghSession, setGhSessionRaw] = useState<GhSession | null>(() => readStorage<GhSession>("gh_session"));
+  const [deviceFlow, setDeviceFlowRaw] = useState<DeviceFlowState | null>(() => readStorage<DeviceFlowState>("gh_device_flow"));
+  const [devicePolling, setDevicePolling] = useState<boolean>(() => readStorage<DeviceFlowState>("gh_device_flow") !== null);
   const [useManualToken, setUseManualToken] = useState(false);
+
+  const setGhSession = (s: GhSession | null) => {
+    setGhSessionRaw(s);
+    if (s) writeStorage("gh_session", s); else clearStorage("gh_session");
+  };
+  const setDeviceFlow = (f: DeviceFlowState | null) => {
+    setDeviceFlowRaw(f);
+    if (f) writeStorage("gh_device_flow", f); else clearStorage("gh_device_flow");
+  };
 
   useEffect(() => {
     if (ghSession) ejectForm2.setValue("githubToken", ghSession.token);
@@ -385,7 +408,8 @@ export default function Home() {
       const res = await fetch("/api/auth/device/start", { method: "POST", headers: { "Content-Type": "application/json" } });
       const data = await res.json() as { device_code?: string; user_code?: string; verification_uri?: string; interval?: number; error?: string };
       if (!res.ok || data.error) throw new Error(data.error ?? "Failed to start device flow");
-      setDeviceFlow({ device_code: data.device_code!, user_code: data.user_code!, verification_uri: data.verification_uri!, interval: data.interval ?? 5 });
+      const flow: DeviceFlowState = { device_code: data.device_code!, user_code: data.user_code!, verification_uri: data.verification_uri!, interval: data.interval ?? 5 };
+      setDeviceFlow(flow);
       setDevicePolling(true);
     } catch (err) {
       toast({ title: "GitHub connection failed", description: err instanceof Error ? err.message : "Unknown error", variant: "destructive" });
