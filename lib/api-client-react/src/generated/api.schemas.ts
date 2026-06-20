@@ -14,6 +14,8 @@ export interface PushInput {
   base44AppId: string;
   /** The Base44 API Key */
   base44ApiKey: string;
+  /** Your Base44 app URL, e.g. https://my-app.base44.app */
+  base44AppUrl?: string;
   /** GitHub Personal Access Token */
   githubToken: string;
   /** GitHub repository owner (username or org) */
@@ -36,6 +38,8 @@ export interface PushResult {
 export interface PreviewInput {
   base44AppId: string;
   base44ApiKey: string;
+  /** Your Base44 app URL, e.g. https://my-app.base44.app */
+  base44AppUrl?: string;
 }
 
 export interface FileEntry {

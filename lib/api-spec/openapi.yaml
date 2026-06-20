@@ -111,6 +111,9 @@ components:
         base44ApiKey:
           type: string
           description: The Base44 API Key
+        base44AppUrl:
+          type: string
+          description: "Your Base44 app URL, e.g. https://my-app.base44.app"
         githubToken:
           type: string
           description: GitHub Personal Access Token
@@ -154,6 +157,9 @@ components:
           type: string
         base44ApiKey:
           type: string
+        base44AppUrl:
+          type: string
+          description: "Your Base44 app URL, e.g. https://my-app.base44.app"
     PreviewResult:
       type: object
       required:

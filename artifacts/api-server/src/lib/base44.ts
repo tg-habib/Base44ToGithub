@@ -1,6 +1,5 @@
 import { logger } from "./logger";
 
-const RUNTIME_API = "https://base44.app/api";
 const STUDIO_API = "https://app.base44.com/api";
 
 export interface Base44File {
@@ -18,9 +17,8 @@ export interface Base44AppInfo {
 type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
 type JsonObj = { [k: string]: Json };
 
-function runtimeHeaders(appId: string, apiKey: string): Record<string, string> {
+function runtimeHeaders(apiKey: string): Record<string, string> {
   return {
-    "X-App-Id": appId,
     "api_key": apiKey,
     "Content-Type": "application/json",
     Accept: "application/json",
@@ -63,104 +61,67 @@ async function safeGet(url: string, headers: Record<string, string>): Promise<Js
       throw new Error("UNAUTHORIZED");
     }
     if (!res.ok) return null;
-    return await res.json() as Json;
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as Json;
+    } catch {
+      return null;
+    }
   } catch (err) {
     if (err instanceof Error && err.message === "UNAUTHORIZED") throw err;
     return null;
   }
 }
 
-function extractName(data: Json): string | null {
-  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
-  const obj = data as JsonObj;
-  const name = obj["name"] ?? obj["appName"] ?? obj["app_name"] ?? obj["title"];
-  return typeof name === "string" && name.trim() ? name.trim() : null;
+// ---------- Step 1: fetch app metadata from studio API ----------
+
+interface AppMetadata {
+  appName: string;
+  subdomain: string | null;
+  runtimeBase: string | null;
 }
 
-function extractEntitiesFromResponse(data: Json): Base44File[] {
-  const files: Base44File[] = [];
-
-  if (!data || typeof data !== "object") return files;
-
-  const obj = data as JsonObj;
-
-  logger.info(
-    { keys: Object.keys(obj), types: Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, Array.isArray(v) ? `array(${(v as Json[]).length})` : typeof v])) },
-    "Base44 app response shape",
-  );
-
-  const candidateKeys = ["entities", "entitySchemas", "entity_schemas", "schema", "models", "collections", "tables"];
-  for (const key of candidateKeys) {
-    const val = obj[key];
-    if (!val) continue;
-
-    if (Array.isArray(val) && val.length > 0) {
-      for (const entity of val as JsonObj[]) {
-        const name = String(entity["name"] ?? entity["entityName"] ?? entity["type"] ?? "entity");
-        files.push(toFile(`entities/${name}.json`, JSON.stringify(entity, null, 2)));
-      }
-      if (files.length > 0) {
-        logger.info({ key, count: files.length }, "Extracted entities from app metadata");
-        return files;
-      }
-    } else if (typeof val === "object" && !Array.isArray(val)) {
-      const nested = val as JsonObj;
-      for (const [entityName, schema] of Object.entries(nested)) {
-        files.push(toFile(`entities/${entityName}.json`, JSON.stringify(schema, null, 2)));
-      }
-      if (files.length > 0) {
-        logger.info({ key, count: files.length }, "Extracted entities from app metadata (object form)");
-        return files;
-      }
-    }
-  }
-
-  logger.info({ keys: Object.keys(obj) }, "No entity schemas found in app metadata — full keys logged");
-  return files;
-}
-
-function extractFunctionsFromResponse(data: Json): Base44File[] {
-  const files: Base44File[] = [];
-  if (!data || typeof data !== "object" || Array.isArray(data)) return files;
-  const obj = data as JsonObj;
-
-  const candidateKeys = ["functions", "backendFunctions", "backend_functions", "serverFunctions", "server_functions"];
-  for (const key of candidateKeys) {
-    const val = obj[key];
-    if (!val || !Array.isArray(val) || val.length === 0) continue;
-
-    for (const fn of val as JsonObj[]) {
-      const name = String(fn["name"] ?? fn["functionName"] ?? "function");
-      const code = fn["code"] ?? fn["body"] ?? fn["source"];
-      if (typeof code === "string" && code.trim()) {
-        files.push(toFile(`functions/${name}.js`, code));
-      } else {
-        files.push(toFile(`functions/${name}.json`, JSON.stringify(fn, null, 2)));
-      }
-    }
-    if (files.length > 0) return files;
-  }
-  return files;
-}
-
-async function fetchAppMetadata(appId: string, apiKey: string): Promise<{ appName: string; raw: Json | null }> {
-  const endpoints: Array<{ url: string; headers: Record<string, string> }> = [
-    { url: `${STUDIO_API}/apps/${appId}`, headers: studioHeaders(apiKey) },
-    { url: `${STUDIO_API}/apps/${appId}?include=entities,functions,schema`, headers: studioHeaders(apiKey) },
-    { url: `${STUDIO_API}/studio/apps/${appId}`, headers: studioHeaders(apiKey) },
-    { url: `${RUNTIME_API}/apps/${appId}`, headers: runtimeHeaders(appId, apiKey) },
+async function fetchAppMetadata(appId: string, apiKey: string): Promise<AppMetadata> {
+  const studioCandidates = [
+    `${STUDIO_API}/apps/${appId}`,
+    `${STUDIO_API}/apps/${appId}?include=all`,
+    `${STUDIO_API}/studio/apps/${appId}`,
   ];
 
-  for (const { url, headers } of endpoints) {
+  for (const url of studioCandidates) {
     try {
-      const data = await safeGet(url, headers);
-      if (!data) continue;
+      const data = await safeGet(url, studioHeaders(apiKey));
+      if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+      const obj = data as JsonObj;
 
-      const name = extractName(data);
-      if (name) {
-        logger.info({ url, name }, "App metadata fetched from Base44");
-        return { appName: name, raw: data };
-      }
+      logger.info(
+        {
+          url,
+          keys: Object.keys(obj),
+          types: Object.fromEntries(
+            Object.entries(obj).map(([k, v]) => [
+              k,
+              Array.isArray(v) ? `array(${(v as Json[]).length})` : typeof v,
+            ]),
+          ),
+        },
+        "Base44 studio app metadata response shape",
+      );
+
+      const name = String(obj["name"] ?? obj["appName"] ?? obj["title"] ?? appId).trim();
+      const subdomain =
+        typeof obj["subdomain"] === "string" ? obj["subdomain"] :
+        typeof obj["slug"] === "string" ? obj["slug"] :
+        typeof obj["domain"] === "string" ? (obj["domain"] as string).replace(/\.base44\.app$/, "") :
+        typeof obj["url"] === "string" ? extractSubdomainFromUrl(obj["url"] as string) :
+        typeof obj["appUrl"] === "string" ? extractSubdomainFromUrl(obj["appUrl"] as string) :
+        typeof obj["app_url"] === "string" ? extractSubdomainFromUrl(obj["app_url"] as string) :
+        null;
+
+      const runtimeBase = subdomain ? `https://${subdomain}.base44.app/api` : null;
+
+      logger.info({ appId, name, subdomain, runtimeBase, url }, "App metadata resolved");
+      return { appName: name, subdomain, runtimeBase };
     } catch (err) {
       if (err instanceof Error && err.message === "UNAUTHORIZED") {
         throw new Error("Invalid Base44 credentials. Check your App ID and API Key.");
@@ -168,63 +129,136 @@ async function fetchAppMetadata(appId: string, apiKey: string): Promise<{ appNam
     }
   }
 
-  const probe = await fetch(`${RUNTIME_API}/apps/${appId}/entities/User`, {
-    method: "GET",
-    headers: runtimeHeaders(appId, apiKey),
-  });
-  if (probe.status === 401 || probe.status === 403) {
-    throw new Error("Invalid Base44 credentials. Check your App ID and API Key.");
-  }
-
-  return { appName: appId, raw: null };
+  // Last resort: probe runtime API using appId as subdomain candidate — won't work,
+  // but helps produce a useful error vs a silent failure.
+  throw new Error(
+    "Could not reach Base44 API. Verify your App ID is correct and that your API Key has access.",
+  );
 }
 
-async function fetchEntitySchemasFromDedicatedEndpoints(
-  appId: string,
-  apiKey: string,
-): Promise<Base44File[]> {
-  const endpoints: Array<{ url: string; headers: Record<string, string> }> = [
-    { url: `${STUDIO_API}/apps/${appId}/entities`, headers: studioHeaders(apiKey) },
-    { url: `${STUDIO_API}/apps/${appId}/schema`, headers: studioHeaders(apiKey) },
-    { url: `${STUDIO_API}/apps/${appId}/entity-schemas`, headers: studioHeaders(apiKey) },
-    { url: `${STUDIO_API}/apps/${appId}/models`, headers: studioHeaders(apiKey) },
-    { url: `${STUDIO_API}/studio/apps/${appId}/entities`, headers: studioHeaders(apiKey) },
-    { url: `${STUDIO_API}/studio/apps/${appId}/schema`, headers: studioHeaders(apiKey) },
-    { url: `${RUNTIME_API}/apps/${appId}/schema`, headers: runtimeHeaders(appId, apiKey) },
-    { url: `${RUNTIME_API}/apps/${appId}/entities`, headers: runtimeHeaders(appId, apiKey) },
+function extractSubdomainFromUrl(url: string): string | null {
+  try {
+    const host = new URL(url).hostname;
+    const match = host.match(/^([^.]+)\.base44\.app$/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------- Step 2: fetch OpenAPI spec from runtime URL ----------
+
+interface ParsedOpenApiSpec {
+  entitySchemas: Record<string, JsonObj>;
+  entityNames: string[];
+  rawSpec: JsonObj;
+}
+
+async function fetchOpenApiSpec(runtimeBase: string, apiKey: string): Promise<ParsedOpenApiSpec | null> {
+  const candidates = [
+    `${runtimeBase}/openapi.json`,
+    `${runtimeBase}/openapi`,
+    `${runtimeBase}/docs/openapi.json`,
+    `${runtimeBase}/swagger.json`,
   ];
 
-  for (const { url, headers } of endpoints) {
-    const data = await safeGet(url, headers).catch(() => null);
-    if (!data) continue;
+  for (const url of candidates) {
+    const data = await safeGet(url, runtimeHeaders(apiKey)).catch(() => null);
+    if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+    const spec = data as JsonObj;
 
-    const files: Base44File[] = [];
+    if (!spec["openapi"] && !spec["swagger"]) continue;
 
-    if (Array.isArray(data) && data.length > 0) {
-      for (const entity of data as JsonObj[]) {
-        const name = String(entity["name"] ?? entity["entityName"] ?? "entity");
-        files.push(toFile(`entities/${name}.json`, JSON.stringify(entity, null, 2)));
-      }
-      if (files.length > 0) {
-        logger.info({ url, count: files.length }, "Entities fetched from dedicated endpoint");
-        return files;
-      }
+    logger.info({ url }, "OpenAPI spec fetched from Base44 runtime");
+
+    const components = spec["components"] as JsonObj | undefined;
+    const schemas = components?.["schemas"] as Record<string, JsonObj> | undefined;
+
+    if (!schemas || Object.keys(schemas).length === 0) {
+      logger.info({ url }, "OpenAPI spec has no schemas in components");
+      return { entitySchemas: {}, entityNames: [], rawSpec: spec };
     }
 
-    if (data && typeof data === "object" && !Array.isArray(data)) {
-      const extracted = extractEntitiesFromResponse(data);
-      if (extracted.length > 0) return extracted;
-    }
+    const entityNames = Object.keys(schemas);
+    logger.info({ count: entityNames.length, entities: entityNames }, "Entities found in OpenAPI spec");
+
+    return { entitySchemas: schemas, entityNames, rawSpec: spec };
   }
 
-  return [];
+  return null;
 }
 
-function generateSetupFiles(appId: string, appName: string): Base44File[] {
-  const displayName = appName !== appId ? appName : "Base44 App";
+// ---------- Step 3: generate files from OpenAPI spec ----------
+
+function schemasToFiles(schemas: Record<string, JsonObj>): Base44File[] {
+  const files: Base44File[] = [];
+
+  for (const [entityName, schema] of Object.entries(schemas)) {
+    files.push(toFile(`entities/${entityName}.json`, JSON.stringify(schema, null, 2)));
+  }
+
+  // Also generate TypeScript interfaces
+  const tsLines = [
+    `// Auto-generated from Base44 OpenAPI spec`,
+    `// Do not edit manually — regenerate by running the Base44 to GitHub export tool`,
+    ``,
+  ];
+
+  for (const [entityName, schema] of Object.entries(schemas)) {
+    const props = (schema["properties"] as Record<string, JsonObj>) ?? {};
+    const required = (schema["required"] as string[]) ?? [];
+    const description = schema["description"] as string | undefined;
+
+    if (description) tsLines.push(`/** ${description} */`);
+    tsLines.push(`export interface ${entityName} {`);
+
+    for (const [propName, propSchema] of Object.entries(props)) {
+      const propObj = propSchema as JsonObj;
+      const isRequired = required.includes(propName);
+      const tsType = jsonSchemaTypeToTs(propObj);
+      const desc = propObj["description"] as string | undefined;
+      if (desc) tsLines.push(`  /** ${desc} */`);
+      tsLines.push(`  ${propName}${isRequired ? "" : "?"}: ${tsType};`);
+    }
+
+    tsLines.push(`}`, ``);
+  }
+
+  files.push(toFile("types.ts", tsLines.join("\n")));
+
+  return files;
+}
+
+function jsonSchemaTypeToTs(schema: JsonObj): string {
+  const type = schema["type"] as string | undefined;
+  const enumVals = schema["enum"] as string[] | undefined;
+
+  if (enumVals) return enumVals.map((e) => JSON.stringify(e)).join(" | ");
+
+  switch (type) {
+    case "string": return "string";
+    case "integer":
+    case "number": return "number";
+    case "boolean": return "boolean";
+    case "array": {
+      const items = schema["items"] as JsonObj | undefined;
+      return items ? `${jsonSchemaTypeToTs(items)}[]` : "unknown[]";
+    }
+    case "object": return "Record<string, unknown>";
+    default: return "unknown";
+  }
+}
+
+// ---------- Step 4: generate setup files ----------
+
+function generateSetupFiles(appId: string, appName: string, runtimeBase: string | null, openApiSpec: ParsedOpenApiSpec | null): Base44File[] {
+  const displayName = appName;
+  const apiBase = runtimeBase ?? `https://YOUR-APP.base44.app/api`;
 
   const clientCode = `import { createClient } from '@base44/sdk';
 
+// Base44 client pre-configured for ${displayName}
+// Set BASE44_API_KEY in your environment
 const base44 = createClient({
   appId: "${appId}",
   headers: {
@@ -233,87 +267,139 @@ const base44 = createClient({
 });
 
 export default base44;
+
+/*
+  Usage examples:
+    const users = await base44.entities.User.list();
+    const user  = await base44.entities.User.get('record-id');
+    const newUser = await base44.entities.User.create({ ... });
+    await base44.entities.User.update('record-id', { ... });
+    await base44.entities.User.delete('record-id');
+*/
 `;
 
   const envExample = `# Base44 credentials
+# Get your API key from the Base44 dashboard → User Profile
 BASE44_API_KEY=your_api_key_here
 `;
 
+  const entityList = openApiSpec?.entityNames.map((n) => `| \`entities/${n}.json\` | ${n} entity schema |`).join("\n") ?? "";
+
   const readme = `# ${displayName}
 
-**App ID:** \`${appId}\`
+> Exported from [Base44](https://app.base44.com) on ${new Date().toISOString().split("T")[0]}
 
-Exported from [Base44](https://app.base44.com) on ${new Date().toISOString().split("T")[0]}.
+**App ID:** \`${appId}\`  
+**API Base:** \`${apiBase}\`
 
-## Setup
+## Quick start
 
 \`\`\`bash
 npm install @base44/sdk
+cp .env.example .env
+# edit .env and add your API key
 \`\`\`
-
-Copy \`.env.example\` to \`.env\` and fill in your API key.
 
 \`\`\`typescript
 import base44 from './base44-client';
 
-// List all records for an entity
-const records = await base44.entities.MyEntity.list();
-
-// Get a specific record
-const item = await base44.entities.MyEntity.get('record-id');
-
-// Create a new record
-const created = await base44.entities.MyEntity.create({ field: 'value' });
+// List all User records
+const users = await base44.entities.User.list();
+console.log(users);
 \`\`\`
 
-## Structure
+## File structure
 
-| Path | Description |
+| File | Description |
 |------|-------------|
 | \`base44-client.js\` | Pre-configured SDK client |
+| \`types.ts\` | TypeScript interfaces for all entities |
 | \`.env.example\` | Environment variable template |
-| \`entities/\` | Entity schema definitions |
-| \`functions/\` | Backend function source code |
+${entityList}
+${openApiSpec ? `| \`openapi.json\` | Full OpenAPI 3.0 spec |` : ""}
+
+## Authentication
+
+Add the \`api_key\` header to all requests:
+
+\`\`\`
+api_key: <your_api_key>
+\`\`\`
+
+## API reference
+
+See \`openapi.json\` for the full interactive API reference, or visit the Base44 dashboard.
 `;
 
-  return [
+  const files: Base44File[] = [
     toFile("base44-client.js", clientCode),
     toFile(".env.example", envExample),
     toFile("README.md", readme),
   ];
+
+  if (openApiSpec) {
+    files.push(toFile("openapi.json", JSON.stringify(openApiSpec.rawSpec, null, 2)));
+  }
+
+  return files;
 }
 
-export async function fetchBase44App(appId: string, apiKey: string): Promise<Base44AppInfo> {
-  const { appName, raw } = await fetchAppMetadata(appId, apiKey);
+// ---------- Main export ----------
 
-  let entityFiles: Base44File[] = [];
-  let functionFiles: Base44File[] = [];
+export async function fetchBase44App(appId: string, apiKey: string, appUrl?: string): Promise<Base44AppInfo> {
+  // If the user explicitly provides their app URL, use it directly as the runtime base
+  // and still fetch the app name from the studio API (best-effort).
+  let resolvedRuntimeBase: string | null = null;
+  let appName = appId;
+  let subdomain: string | null = null;
 
-  if (raw) {
-    entityFiles = extractEntitiesFromResponse(raw);
-    functionFiles = extractFunctionsFromResponse(raw);
+  if (appUrl) {
+    // Normalise: strip trailing slash, strip /api suffix
+    const cleaned = appUrl.trim().replace(/\/api\/?$/, "").replace(/\/$/, "");
+    resolvedRuntimeBase = `${cleaned}/api`;
+    subdomain = extractSubdomainFromUrl(cleaned);
+    logger.info({ appUrl, resolvedRuntimeBase, subdomain }, "Using user-provided app URL");
+    // Still try to get the friendly app name from studio
+    try {
+      const meta = await fetchAppMetadata(appId, apiKey);
+      appName = meta.appName;
+    } catch {
+      // non-fatal — keep appId as fallback
+    }
+  } else {
+    const meta = await fetchAppMetadata(appId, apiKey);
+    appName = meta.appName;
+    subdomain = meta.subdomain;
+    resolvedRuntimeBase = meta.runtimeBase;
   }
 
-  if (entityFiles.length === 0) {
-    entityFiles = await fetchEntitySchemasFromDedicatedEndpoints(appId, apiKey);
+  let openApiResult: ParsedOpenApiSpec | null = null;
+
+  if (resolvedRuntimeBase) {
+    openApiResult = await fetchOpenApiSpec(resolvedRuntimeBase, apiKey);
+  } else {
+    logger.warn({ appId }, "No app URL found — cannot fetch OpenAPI spec. Provide your app URL for full export.");
   }
 
-  const setupFiles = generateSetupFiles(appId, appName);
-  const allFiles = [...entityFiles, ...functionFiles, ...setupFiles];
+  const entityFiles = openApiResult ? schemasToFiles(openApiResult.entitySchemas) : [];
+  const setupFiles = generateSetupFiles(appId, appName, resolvedRuntimeBase, openApiResult);
+
+  const allFiles = [...entityFiles, ...setupFiles];
 
   logger.info(
     {
       appId,
       appName,
-      entityCount: entityFiles.length,
-      functionCount: functionFiles.length,
-      setupCount: setupFiles.length,
+      subdomain,
+      runtimeBase: resolvedRuntimeBase,
+      entityCount: openApiResult?.entityNames.length ?? 0,
+      totalFiles: allFiles.length,
     },
     "Base44 app fetched",
   );
 
   return {
-    appName: appName !== appId ? appName : "Base44 App",
+    appName,
     files: allFiles,
   };
 }

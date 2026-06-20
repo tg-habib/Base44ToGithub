@@ -15,10 +15,10 @@ router.post("/preview", async (req, res): Promise<void> => {
     return;
   }
 
-  const { base44AppId, base44ApiKey } = parsed.data;
+  const { base44AppId, base44ApiKey, base44AppUrl } = parsed.data;
 
   try {
-    const appInfo = await fetchBase44App(base44AppId, base44ApiKey);
+    const appInfo = await fetchBase44App(base44AppId, base44ApiKey, base44AppUrl ?? undefined);
     res.json({
       appName: appInfo.appName,
       files: appInfo.files.map((f) => ({
@@ -44,6 +44,7 @@ router.post("/push", async (req, res): Promise<void> => {
   const {
     base44AppId,
     base44ApiKey,
+    base44AppUrl,
     githubToken,
     githubOwner,
     githubRepo,
@@ -52,7 +53,7 @@ router.post("/push", async (req, res): Promise<void> => {
   } = parsed.data;
 
   try {
-    const appInfo = await fetchBase44App(base44AppId, base44ApiKey);
+    const appInfo = await fetchBase44App(base44AppId, base44ApiKey, base44AppUrl ?? undefined);
 
     if (appInfo.files.length === 0) {
       res.status(400).json({ error: "No files found in the Base44 app to push." });

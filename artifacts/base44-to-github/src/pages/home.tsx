@@ -28,6 +28,7 @@ import type { PreviewResult } from "@workspace/api-client-react/src/generated/ap
 const previewSchema = z.object({
   base44AppId: z.string().min(1, "App ID is required"),
   base44ApiKey: z.string().min(1, "API Key is required"),
+  base44AppUrl: z.string().optional(),
 });
 
 const githubSchema = z.object({
@@ -140,7 +141,7 @@ export default function Home() {
 
   const form1 = useForm<z.infer<typeof previewSchema>>({
     resolver: zodResolver(previewSchema),
-    defaultValues: { base44AppId: "", base44ApiKey: "" },
+    defaultValues: { base44AppId: "", base44ApiKey: "", base44AppUrl: "" },
   });
 
   const form2 = useForm<z.infer<typeof githubSchema>>({
@@ -299,6 +300,36 @@ export default function Home() {
                           </FormControl>
                           <FieldHint>
                             Found in the same code snippet as the App ID — it's the value of the <code className="bg-muted px-1 rounded text-xs">api_key</code> field.
+                          </FieldHint>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form1.control}
+                      name="base44AppUrl"
+                      render={({ field }) => (
+                        <FormItem>
+                          <div className="flex items-center justify-between">
+                            <FormLabel className="text-sm font-medium">
+                              App URL
+                              <span className="ml-2 text-xs font-normal text-muted-foreground">(optional but recommended)</span>
+                            </FormLabel>
+                            <HelpLink href="https://app.base44.com">
+                              Find it in your dashboard
+                            </HelpLink>
+                          </div>
+                          <FormControl>
+                            <Input
+                              placeholder="https://my-app-name.base44.app"
+                              className="font-mono text-sm"
+                              {...field}
+                            />
+                          </FormControl>
+                          <FieldHint>
+                            Your live app URL — enables exporting entity schemas and the full API spec.
+                            Find it in your Base44 dashboard under <strong>API → Documentation</strong> at the top of the page.
                           </FieldHint>
                           <FormMessage />
                         </FormItem>

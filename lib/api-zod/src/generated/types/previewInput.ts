@@ -9,4 +9,6 @@
 export interface PreviewInput {
   base44AppId: string;
   base44ApiKey: string;
+  /** Your Base44 app URL, e.g. https://my-app.base44.app */
+  base44AppUrl?: string;
 }

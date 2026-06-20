@@ -27,6 +27,7 @@ export const pushToGithubBodyCommitMessageDefault = `chore: sync from Base44`;
 export const PushToGithubBody = zod.object({
   "base44AppId": zod.string().describe('The Base44 App ID'),
   "base44ApiKey": zod.string().describe('The Base44 API Key'),
+  "base44AppUrl": zod.string().optional().describe('Your Base44 app URL, e.g. https:\/\/my-app.base44.app'),
   "githubToken": zod.string().describe('GitHub Personal Access Token'),
   "githubOwner": zod.string().describe('GitHub repository owner (username or org)'),
   "githubRepo": zod.string().describe('GitHub repository name'),
@@ -48,7 +49,8 @@ export const PushToGithubResponse = zod.object({
  */
 export const PreviewBase44FilesBody = zod.object({
   "base44AppId": zod.string(),
-  "base44ApiKey": zod.string()
+  "base44ApiKey": zod.string(),
+  "base44AppUrl": zod.string().optional().describe('Your Base44 app URL, e.g. https:\/\/my-app.base44.app')
 })
 
 export const PreviewBase44FilesResponse = zod.object({
