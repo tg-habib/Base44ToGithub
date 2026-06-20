@@ -70,3 +70,8 @@ externalPort = 3000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+GITHUB_CLIENT_ID = "Ov23lizqoA0fRXv1zdr0"
