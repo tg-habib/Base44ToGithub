@@ -332,13 +332,19 @@ export default function Home() {
   const [tab, setTab] = useState<Tab>("eject");
 
   /* ── Eject state — two forms + SSE stream ── */
-  const [ejectStep, setEjectStep] = useState<1 | 2>(1);
-  const [ejectStep1Data, setEjectStep1Data] = useState<z.infer<typeof ejectStep1Schema> | null>(null);
+  // Helpers (defined before first use; duplicated below in device-flow section but that's fine — same logic)
+  function _readSS<T>(key: string): T | null {
+    try { return JSON.parse(sessionStorage.getItem(key) ?? "null") as T; } catch { return null; }
+  }
+
+  const _savedCreds = _readSS<z.infer<typeof ejectStep1Schema>>("eject_step1");
+  const [ejectStep, setEjectStep] = useState<1 | 2>(_savedCreds ? 2 : 1);
+  const [ejectStep1Data, setEjectStep1Data] = useState<z.infer<typeof ejectStep1Schema> | null>(_savedCreds);
   const { state: streamState, run: runStream, reset: resetStream } = useEjectStream();
 
   const ejectForm1 = useForm<z.infer<typeof ejectStep1Schema>>({
     resolver: zodResolver(ejectStep1Schema),
-    defaultValues: { base44AppId: "", base44ApiKey: "" },
+    defaultValues: _savedCreds ?? { base44AppId: "", base44ApiKey: "" },
   });
 
   const ejectForm2 = useForm<z.infer<typeof ejectStep2Schema>>({
@@ -425,6 +431,7 @@ export default function Home() {
   };
 
   const onEjectStep1Submit = (values: z.infer<typeof ejectStep1Schema>) => {
+    try { sessionStorage.setItem("eject_step1", JSON.stringify(values)); } catch { /* noop */ }
     setEjectStep1Data(values);
     setEjectStep(2);
   };
@@ -438,6 +445,7 @@ export default function Home() {
     resetStream();
     setEjectStep(1);
     setEjectStep1Data(null);
+    try { sessionStorage.removeItem("eject_step1"); } catch { /* noop */ }
     ejectForm1.reset();
     ejectForm2.reset();
   };
