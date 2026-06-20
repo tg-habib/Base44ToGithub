@@ -15,6 +15,9 @@ export interface Base44AppInfo {
   files: Base44File[];
 }
 
+type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
+type JsonObj = { [k: string]: Json };
+
 function runtimeHeaders(appId: string, apiKey: string): Record<string, string> {
   return {
     "X-App-Id": appId,
@@ -24,22 +27,12 @@ function runtimeHeaders(appId: string, apiKey: string): Record<string, string> {
   };
 }
 
-async function runtimeGet(path: string, appId: string, apiKey: string): Promise<Response> {
-  return fetch(`${RUNTIME_API}${path}`, {
-    method: "GET",
-    headers: runtimeHeaders(appId, apiKey),
-  });
-}
-
-async function studioGet(path: string, apiKey: string): Promise<Response> {
-  return fetch(`${STUDIO_API}${path}`, {
-    method: "GET",
-    headers: {
-      "api_key": apiKey,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-  });
+function studioHeaders(apiKey: string): Record<string, string> {
+  return {
+    "api_key": apiKey,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
 }
 
 function detectType(filePath: string): string {
@@ -55,159 +48,172 @@ function detectType(filePath: string): string {
 }
 
 function toFile(path: string, content: string): Base44File {
-  const str = typeof content === "string" ? content : JSON.stringify(content, null, 2);
-  return { path, content: str, size: Buffer.byteLength(str, "utf8"), type: detectType(path) };
+  return {
+    path,
+    content,
+    size: Buffer.byteLength(content, "utf8"),
+    type: detectType(path),
+  };
 }
 
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
-
-function safeJson(data: JsonValue): string {
-  return JSON.stringify(data, null, 2);
-}
-
-async function tryGetJson(res: Response): Promise<JsonValue | null> {
-  if (!res.ok) return null;
-  try { return await res.json() as JsonValue; } catch { return null; }
-}
-
-async function verifyCredentials(appId: string, apiKey: string): Promise<string> {
-  const endpointsToTry = [
-    `${RUNTIME_API}/apps/${appId}`,
-    `${STUDIO_API}/apps/${appId}`,
-    `${STUDIO_API}/studio/apps/${appId}`,
-  ];
-
-  for (const url of endpointsToTry) {
-    const isRuntime = url.startsWith(RUNTIME_API);
-    const headers = isRuntime ? runtimeHeaders(appId, apiKey) : {
-      "api_key": apiKey, "Content-Type": "application/json", Accept: "application/json",
-    };
-
+async function safeGet(url: string, headers: Record<string, string>): Promise<Json | null> {
+  try {
     const res = await fetch(url, { method: "GET", headers });
-
     if (res.status === 401 || res.status === 403) {
-      throw new Error(
-        "Invalid Base44 credentials. Check your App ID and API Key.",
-      );
+      throw new Error("UNAUTHORIZED");
     }
+    if (!res.ok) return null;
+    return await res.json() as Json;
+  } catch (err) {
+    if (err instanceof Error && err.message === "UNAUTHORIZED") throw err;
+    return null;
+  }
+}
 
-    if (res.ok) {
-      const data = await tryGetJson(res) as Record<string, JsonValue> | null;
-      if (data && typeof data === "object" && !Array.isArray(data)) {
-        const name = data["name"] ?? data["appName"] ?? data["app_name"] ?? data["title"];
-        if (name && typeof name === "string") return name;
+function extractName(data: Json): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const obj = data as JsonObj;
+  const name = obj["name"] ?? obj["appName"] ?? obj["app_name"] ?? obj["title"];
+  return typeof name === "string" && name.trim() ? name.trim() : null;
+}
+
+function extractEntitiesFromResponse(data: Json): Base44File[] {
+  const files: Base44File[] = [];
+
+  if (!data || typeof data !== "object") return files;
+
+  const obj = data as JsonObj;
+
+  logger.info(
+    { keys: Object.keys(obj), types: Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, Array.isArray(v) ? `array(${(v as Json[]).length})` : typeof v])) },
+    "Base44 app response shape",
+  );
+
+  const candidateKeys = ["entities", "entitySchemas", "entity_schemas", "schema", "models", "collections", "tables"];
+  for (const key of candidateKeys) {
+    const val = obj[key];
+    if (!val) continue;
+
+    if (Array.isArray(val) && val.length > 0) {
+      for (const entity of val as JsonObj[]) {
+        const name = String(entity["name"] ?? entity["entityName"] ?? entity["type"] ?? "entity");
+        files.push(toFile(`entities/${name}.json`, JSON.stringify(entity, null, 2)));
+      }
+      if (files.length > 0) {
+        logger.info({ key, count: files.length }, "Extracted entities from app metadata");
+        return files;
+      }
+    } else if (typeof val === "object" && !Array.isArray(val)) {
+      const nested = val as JsonObj;
+      for (const [entityName, schema] of Object.entries(nested)) {
+        files.push(toFile(`entities/${entityName}.json`, JSON.stringify(schema, null, 2)));
+      }
+      if (files.length > 0) {
+        logger.info({ key, count: files.length }, "Extracted entities from app metadata (object form)");
+        return files;
       }
     }
   }
 
-  const probe = await runtimeGet(`/apps/${appId}/entities/User`, appId, apiKey);
+  logger.info({ keys: Object.keys(obj) }, "No entity schemas found in app metadata — full keys logged");
+  return files;
+}
+
+function extractFunctionsFromResponse(data: Json): Base44File[] {
+  const files: Base44File[] = [];
+  if (!data || typeof data !== "object" || Array.isArray(data)) return files;
+  const obj = data as JsonObj;
+
+  const candidateKeys = ["functions", "backendFunctions", "backend_functions", "serverFunctions", "server_functions"];
+  for (const key of candidateKeys) {
+    const val = obj[key];
+    if (!val || !Array.isArray(val) || val.length === 0) continue;
+
+    for (const fn of val as JsonObj[]) {
+      const name = String(fn["name"] ?? fn["functionName"] ?? "function");
+      const code = fn["code"] ?? fn["body"] ?? fn["source"];
+      if (typeof code === "string" && code.trim()) {
+        files.push(toFile(`functions/${name}.js`, code));
+      } else {
+        files.push(toFile(`functions/${name}.json`, JSON.stringify(fn, null, 2)));
+      }
+    }
+    if (files.length > 0) return files;
+  }
+  return files;
+}
+
+async function fetchAppMetadata(appId: string, apiKey: string): Promise<{ appName: string; raw: Json | null }> {
+  const endpoints: Array<{ url: string; headers: Record<string, string> }> = [
+    { url: `${STUDIO_API}/apps/${appId}`, headers: studioHeaders(apiKey) },
+    { url: `${STUDIO_API}/apps/${appId}?include=entities,functions,schema`, headers: studioHeaders(apiKey) },
+    { url: `${STUDIO_API}/studio/apps/${appId}`, headers: studioHeaders(apiKey) },
+    { url: `${RUNTIME_API}/apps/${appId}`, headers: runtimeHeaders(appId, apiKey) },
+  ];
+
+  for (const { url, headers } of endpoints) {
+    try {
+      const data = await safeGet(url, headers);
+      if (!data) continue;
+
+      const name = extractName(data);
+      if (name) {
+        logger.info({ url, name }, "App metadata fetched from Base44");
+        return { appName: name, raw: data };
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message === "UNAUTHORIZED") {
+        throw new Error("Invalid Base44 credentials. Check your App ID and API Key.");
+      }
+    }
+  }
+
+  const probe = await fetch(`${RUNTIME_API}/apps/${appId}/entities/User`, {
+    method: "GET",
+    headers: runtimeHeaders(appId, apiKey),
+  });
   if (probe.status === 401 || probe.status === 403) {
     throw new Error("Invalid Base44 credentials. Check your App ID and API Key.");
   }
 
-  return appId;
+  return { appName: appId, raw: null };
 }
 
-interface EntitySchema {
-  name: string;
-  fields?: Array<{ name: string; type: string; required?: boolean }>;
-  [key: string]: JsonValue | undefined;
-}
-
-async function fetchEntitySchemas(appId: string, apiKey: string): Promise<Base44File[]> {
-  const schemaPaths = [
-    `${RUNTIME_API}/apps/${appId}/schema`,
-    `${RUNTIME_API}/apps/${appId}/entities-schema`,
-    `${RUNTIME_API}/apps/${appId}/entities`,
-    `${STUDIO_API}/apps/${appId}/schema`,
-    `${STUDIO_API}/apps/${appId}/entities`,
-    `${STUDIO_API}/studio/apps/${appId}/schema`,
+async function fetchEntitySchemasFromDedicatedEndpoints(
+  appId: string,
+  apiKey: string,
+): Promise<Base44File[]> {
+  const endpoints: Array<{ url: string; headers: Record<string, string> }> = [
+    { url: `${STUDIO_API}/apps/${appId}/entities`, headers: studioHeaders(apiKey) },
+    { url: `${STUDIO_API}/apps/${appId}/schema`, headers: studioHeaders(apiKey) },
+    { url: `${STUDIO_API}/apps/${appId}/entity-schemas`, headers: studioHeaders(apiKey) },
+    { url: `${STUDIO_API}/apps/${appId}/models`, headers: studioHeaders(apiKey) },
+    { url: `${STUDIO_API}/studio/apps/${appId}/entities`, headers: studioHeaders(apiKey) },
+    { url: `${STUDIO_API}/studio/apps/${appId}/schema`, headers: studioHeaders(apiKey) },
+    { url: `${RUNTIME_API}/apps/${appId}/schema`, headers: runtimeHeaders(appId, apiKey) },
+    { url: `${RUNTIME_API}/apps/${appId}/entities`, headers: runtimeHeaders(appId, apiKey) },
   ];
 
-  for (const url of schemaPaths) {
-    const isRuntime = url.startsWith(RUNTIME_API);
-    const headers = isRuntime ? runtimeHeaders(appId, apiKey) : {
-      "api_key": apiKey, "Content-Type": "application/json", Accept: "application/json",
-    };
+  for (const { url, headers } of endpoints) {
+    const data = await safeGet(url, headers).catch(() => null);
+    if (!data) continue;
 
-    try {
-      const res = await fetch(url, { method: "GET", headers });
-      if (!res.ok) continue;
+    const files: Base44File[] = [];
 
-      const data = await tryGetJson(res);
-      if (!data) continue;
-
-      logger.info({ url }, "Base44 schema endpoint responded");
-
-      const files: Base44File[] = [];
-
-      if (Array.isArray(data)) {
-        for (const entity of data as EntitySchema[]) {
-          const name = entity.name ?? entity["entityName"] ?? "entity";
-          files.push(toFile(`entities/${name}.json`, safeJson(entity)));
-        }
-        if (files.length > 0) return files;
-      } else if (data && typeof data === "object" && !Array.isArray(data)) {
-        const obj = data as Record<string, JsonValue>;
-
-        const entities = obj["entities"] ?? obj["schema"] ?? obj["entitySchemas"];
-        if (entities && Array.isArray(entities)) {
-          for (const entity of entities as EntitySchema[]) {
-            const name = entity.name ?? entity["entityName"] ?? "entity";
-            files.push(toFile(`entities/${name}.json`, safeJson(entity)));
-          }
-          if (files.length > 0) return files;
-        }
-
-        const knownSchemaKeys = Object.keys(obj).filter(
-          (k) => !["id", "appId", "name", "createdAt", "updatedAt"].includes(k),
-        );
-        if (knownSchemaKeys.length > 0) {
-          for (const key of knownSchemaKeys) {
-            files.push(toFile(`entities/${key}.json`, safeJson(obj[key])));
-          }
-          if (files.length > 0) return files;
-        }
+    if (Array.isArray(data) && data.length > 0) {
+      for (const entity of data as JsonObj[]) {
+        const name = String(entity["name"] ?? entity["entityName"] ?? "entity");
+        files.push(toFile(`entities/${name}.json`, JSON.stringify(entity, null, 2)));
       }
-    } catch {
+      if (files.length > 0) {
+        logger.info({ url, count: files.length }, "Entities fetched from dedicated endpoint");
+        return files;
+      }
     }
-  }
 
-  return [];
-}
-
-async function fetchFunctions(appId: string, apiKey: string): Promise<Base44File[]> {
-  const functionPaths = [
-    `${RUNTIME_API}/apps/${appId}/functions`,
-    `${STUDIO_API}/apps/${appId}/functions`,
-    `${STUDIO_API}/studio/apps/${appId}/functions`,
-  ];
-
-  for (const url of functionPaths) {
-    const isRuntime = url.startsWith(RUNTIME_API);
-    const headers = isRuntime ? runtimeHeaders(appId, apiKey) : {
-      "api_key": apiKey, "Content-Type": "application/json", Accept: "application/json",
-    };
-
-    try {
-      const res = await fetch(url, { method: "GET", headers });
-      if (!res.ok) continue;
-
-      const data = await tryGetJson(res);
-      if (!data || !Array.isArray(data)) continue;
-
-      const files: Base44File[] = [];
-      for (const fn of data as Array<Record<string, JsonValue>>) {
-        const name = String(fn["name"] ?? fn["functionName"] ?? "function");
-        const code = fn["code"] ?? fn["body"] ?? fn["source"];
-        if (typeof code === "string" && code.trim()) {
-          files.push(toFile(`functions/${name}.js`, code));
-        } else {
-          files.push(toFile(`functions/${name}.json`, safeJson(fn)));
-        }
-      }
-      if (files.length > 0) return files;
-    } catch {
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      const extracted = extractEntitiesFromResponse(data);
+      if (extracted.length > 0) return extracted;
     }
   }
 
@@ -215,6 +221,8 @@ async function fetchFunctions(appId: string, apiKey: string): Promise<Base44File
 }
 
 function generateSetupFiles(appId: string, appName: string): Base44File[] {
+  const displayName = appName !== appId ? appName : "Base44 App";
+
   const clientCode = `import { createClient } from '@base44/sdk';
 
 const base44 = createClient({
@@ -231,7 +239,7 @@ export default base44;
 BASE44_API_KEY=your_api_key_here
 `;
 
-  const readme = `# ${appName !== appId ? appName : "Base44 App"}
+  const readme = `# ${displayName}
 
 **App ID:** \`${appId}\`
 
@@ -248,21 +256,22 @@ Copy \`.env.example\` to \`.env\` and fill in your API key.
 \`\`\`typescript
 import base44 from './base44-client';
 
-// List all User records
-const users = await base44.entities.User.list();
+// List all records for an entity
+const records = await base44.entities.MyEntity.list();
 
 // Get a specific record
-const user = await base44.entities.User.get('record-id');
+const item = await base44.entities.MyEntity.get('record-id');
 
 // Create a new record
-const newUser = await base44.entities.User.create({ email: 'user@example.com' });
+const created = await base44.entities.MyEntity.create({ field: 'value' });
 \`\`\`
 
-## Files in this repository
+## Structure
 
-| File | Description |
+| Path | Description |
 |------|-------------|
 | \`base44-client.js\` | Pre-configured SDK client |
+| \`.env.example\` | Environment variable template |
 | \`entities/\` | Entity schema definitions |
 | \`functions/\` | Backend function source code |
 `;
@@ -275,18 +284,19 @@ const newUser = await base44.entities.User.create({ email: 'user@example.com' })
 }
 
 export async function fetchBase44App(appId: string, apiKey: string): Promise<Base44AppInfo> {
-  let appName = appId;
+  const { appName, raw } = await fetchAppMetadata(appId, apiKey);
 
-  try {
-    appName = await verifyCredentials(appId, apiKey);
-  } catch (err) {
-    throw err;
+  let entityFiles: Base44File[] = [];
+  let functionFiles: Base44File[] = [];
+
+  if (raw) {
+    entityFiles = extractEntitiesFromResponse(raw);
+    functionFiles = extractFunctionsFromResponse(raw);
   }
 
-  const [entityFiles, functionFiles] = await Promise.all([
-    fetchEntitySchemas(appId, apiKey),
-    fetchFunctions(appId, apiKey),
-  ]);
+  if (entityFiles.length === 0) {
+    entityFiles = await fetchEntitySchemasFromDedicatedEndpoints(appId, apiKey);
+  }
 
   const setupFiles = generateSetupFiles(appId, appName);
   const allFiles = [...entityFiles, ...functionFiles, ...setupFiles];
@@ -302,5 +312,8 @@ export async function fetchBase44App(appId: string, apiKey: string): Promise<Bas
     "Base44 app fetched",
   );
 
-  return { appName: appName !== appId ? appName : "Base44 App", files: allFiles };
+  return {
+    appName: appName !== appId ? appName : "Base44 App",
+    files: allFiles,
+  };
 }
