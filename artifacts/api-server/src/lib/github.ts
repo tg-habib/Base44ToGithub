@@ -211,6 +211,7 @@ async function createGitHubRepo(params: {
   token: string;
   owner: string;
   repo: string;
+  private?: boolean;
 }): Promise<void> {
   const { token, owner, repo } = params;
 
@@ -227,7 +228,7 @@ async function createGitHubRepo(params: {
 
   await githubRequest("POST", endpoint, token, {
     name: repo,
-    private: false,
+    private: params.private ?? false,
     auto_init: false,
   });
 }
@@ -240,6 +241,7 @@ export async function pushFilesToGitHub(params: {
   commitMessage: string;
   files: GitHubFile[];
   onLog?: (msg: string) => void;
+  private?: boolean;
 }): Promise<{ commitUrl: string; filesCount: number }> {
   const { token, owner, repo, branch, commitMessage, files, onLog } = params;
   const base = `https://api.github.com/repos/${owner}/${repo}`;
@@ -247,8 +249,9 @@ export async function pushFilesToGitHub(params: {
   let repoInfo = await githubGet<RepoInfo>(base, token);
 
   if (!repoInfo) {
-    onLog?.(`▶ Repository not found — creating ${owner}/${repo} on GitHub…`);
-    await createGitHubRepo({ token, owner, repo });
+    const visibility = params.private ? "private" : "public";
+    onLog?.(`▶ Repository not found — creating ${owner}/${repo} (${visibility}) on GitHub…`);
+    await createGitHubRepo({ token, owner, repo, private: params.private });
     onLog?.(`✓ Repository ${owner}/${repo} created`);
     // After creation the repo is always empty, skip re-fetching
     return seedEmptyRepoAndPush({ base, token, branch, commitMessage, files });

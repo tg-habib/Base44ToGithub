@@ -105,6 +105,8 @@ router.post("/eject/stream", async (req, res): Promise<void> => {
   const { base44AppId, base44ApiKey, githubToken, githubOwner, githubRepo, branch, commitMessage } =
     parsed.data;
 
+  const isPrivate = Boolean((req.body as Record<string, unknown>)?.private);
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -141,6 +143,7 @@ router.post("/eject/stream", async (req, res): Promise<void> => {
       commitMessage,
       files,
       onLog: sendLog,
+      private: isPrivate,
     });
 
     sendLog(`✓ ${filesCount} file${filesCount !== 1 ? "s" : ""} committed to GitHub`);
