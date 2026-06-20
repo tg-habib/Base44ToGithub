@@ -75,3 +75,4 @@ channel = "stable-25_05"
 
 [userenv.shared]
 GITHUB_CLIENT_ID = "Ov23lizqoA0fRXv1zdr0"
+GITHUB_CLIENT_SECRET = "9bf352737ec1ae72db242fa048c7344833999776"
