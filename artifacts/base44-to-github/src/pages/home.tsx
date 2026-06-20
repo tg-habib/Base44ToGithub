@@ -32,6 +32,8 @@ import {
   ChevronUp,
   Zap,
   Database,
+  LogIn,
+  Shield,
 } from "lucide-react";
 import type { PreviewResult } from "@workspace/api-client-react/src/generated/api.schemas";
 
@@ -66,9 +68,11 @@ const githubSchema = z.object({
 
 /* ── SSE streaming hook ── */
 
+type AuthPrompt = { url: string; code: string };
+
 type StreamState =
   | { status: "idle" }
-  | { status: "running"; logs: string[] }
+  | { status: "running"; logs: string[]; auth: AuthPrompt | null }
   | { status: "done"; logs: string[]; commitUrl: string; filesCount: number }
   | { status: "error"; logs: string[]; message: string };
 
@@ -81,7 +85,7 @@ function useEjectStream() {
     const ac = new AbortController();
     abortRef.current = ac;
 
-    setState({ status: "running", logs: [] });
+    setState({ status: "running", logs: [], auth: null });
 
     try {
       const res = await fetch("/api/eject/stream", {
@@ -103,6 +107,7 @@ function useEjectStream() {
       const decoder = new TextDecoder();
       let buffer = "";
       const logs: string[] = [];
+      let authPrompt: AuthPrompt | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -127,7 +132,13 @@ function useEjectStream() {
           if (eventName === "log") {
             const line = String(parsed.line ?? "");
             logs.push(line);
-            setState({ status: "running", logs: [...logs] });
+            setState({ status: "running", logs: [...logs], auth: authPrompt });
+          } else if (eventName === "auth") {
+            authPrompt = {
+              url: String(parsed.url ?? "https://app.base44.com/login/device"),
+              code: String(parsed.code ?? ""),
+            };
+            setState({ status: "running", logs: [...logs], auth: authPrompt });
           } else if (eventName === "result") {
             setState({
               status: "done",
@@ -272,6 +283,86 @@ function StepBadge({ current }: { current: 1 | 2 }) {
   );
 }
 
+/* ── Auth banner shown when CLI needs device-code login ── */
+
+function AuthBanner({ auth }: { auth: AuthPrompt }) {
+  const [copied, setCopied] = useState(false);
+
+  const copyCode = () => {
+    if (auth.code) {
+      navigator.clipboard.writeText(auth.code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4 space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
+      {/* Header */}
+      <div className="flex items-center gap-2.5">
+        <div className="w-8 h-8 bg-amber-100 border border-amber-300 rounded-lg flex items-center justify-center shrink-0">
+          <LogIn className="h-4 w-4 text-amber-700" />
+        </div>
+        <div>
+          <p className="text-sm font-bold text-amber-900">Action required: Authenticate with Base44</p>
+          <p className="text-xs text-amber-700 leading-relaxed">
+            The CLI needs you to log in once. Complete the steps below — the eject will continue automatically.
+          </p>
+        </div>
+      </div>
+
+      {/* Steps */}
+      <div className="space-y-2">
+        {/* Step 1: Copy code */}
+        {auth.code && (
+          <div className="flex items-center gap-3 bg-white border border-amber-200 rounded-lg px-3 py-2.5">
+            <div className="w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs font-bold shrink-0">1</div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-amber-800 font-medium">Your verification code</p>
+              <p className="text-lg font-mono font-bold text-amber-900 tracking-widest">{auth.code}</p>
+            </div>
+            <button
+              onClick={copyCode}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-md text-xs font-medium text-amber-800 transition-colors"
+            >
+              {copied
+                ? <><CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />Copied!</>
+                : <><Copy className="h-3.5 w-3.5" />Copy</>}
+            </button>
+          </div>
+        )}
+
+        {/* Step 2: Open URL */}
+        <div className="flex items-center gap-3 bg-white border border-amber-200 rounded-lg px-3 py-2.5">
+          <div className="w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs font-bold shrink-0">{auth.code ? "2" : "1"}</div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs text-amber-800 font-medium">Open this page and enter the code above</p>
+            <p className="text-xs text-amber-700 font-mono truncate">{auth.url}</p>
+          </div>
+          <a
+            href={auth.url}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-600 rounded-md text-xs font-medium text-white transition-colors shrink-0"
+          >
+            Open <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
+
+        {/* Step 3: Wait */}
+        <div className="flex items-center gap-3 bg-white border border-amber-200 rounded-lg px-3 py-2.5">
+          <div className="w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs font-bold shrink-0">{auth.code ? "3" : "2"}</div>
+          <div className="flex-1">
+            <p className="text-xs text-amber-800 font-medium">Return here after confirming</p>
+            <p className="text-xs text-amber-700">The eject will continue automatically once you approve. You have up to 5 minutes.</p>
+          </div>
+          <Loader2 className="h-4 w-4 animate-spin text-amber-500 shrink-0" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Live terminal panel ── */
 
 function LiveTerminal({ logs, running }: { logs: string[]; running: boolean }) {
@@ -307,6 +398,7 @@ function LiveTerminal({ logs, running }: { logs: string[]; running: boolean }) {
               line.startsWith("✓") ? "text-emerald-400" :
               line.startsWith("▶") ? "text-sky-400" :
               line.startsWith("✗") || line.toLowerCase().includes("error") ? "text-red-400" :
+              line.toLowerCase().includes("verification") || line.toLowerCase().includes("device") ? "text-amber-300" :
               "text-zinc-300"
             }>
               {line || <>&nbsp;</>}
@@ -368,6 +460,7 @@ export default function Home() {
   const isError = streamState.status === "error";
   const showTerminal = streamState.status === "running" || streamState.status === "done" || streamState.status === "error";
   const logs = showTerminal ? streamState.logs : [];
+  const authPrompt = streamState.status === "running" ? streamState.auth : null;
 
   /* ── Metadata push state ── */
   const [metaStep, setMetaStep] = useState<1 | 2 | 3>(1);
@@ -464,8 +557,8 @@ export default function Home() {
               <div>
                 <p className="text-sm font-semibold text-foreground">How this works</p>
                 <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                  Runs <code className="bg-muted px-1 rounded">npx base44 eject</code> on the server using your API key, collects all React/JSX source files, and pushes them to GitHub in one commit.
-                  Takes ~30–90 seconds. <strong className="text-foreground">Free — no paid Base44 plan required.</strong>
+                  Runs <code className="bg-muted px-1 rounded">npx base44 eject</code> on the server, collects all React/JSX source files, and pushes them to GitHub in one commit.
+                  The <strong className="text-foreground">first run requires a one-time login</strong> — a verification code will appear and you'll click a link to confirm in your Base44 account. Subsequent runs are instant.
                 </p>
               </div>
             </div>
@@ -523,18 +616,29 @@ export default function Home() {
               </Card>
             )}
 
-            {/* ── Running screen (terminal only, form stays visible but locked) ── */}
+            {/* ── Running screen ── */}
             {isRunning && (
               <Card>
                 <div className="p-5 space-y-4">
-                  <div className="flex items-center gap-3">
-                    <Loader2 className="h-5 w-5 animate-spin text-primary shrink-0" />
-                    <div>
-                      <p className="text-sm font-semibold text-foreground">Ejecting your app…</p>
-                      <p className="text-xs text-muted-foreground">This takes 30–90 seconds.</p>
+                  {/* Auth banner — shown prominently when CLI needs device-code login */}
+                  {authPrompt ? (
+                    <AuthBanner auth={authPrompt} />
+                  ) : (
+                    <div className="flex items-center gap-3">
+                      <Loader2 className="h-5 w-5 animate-spin text-primary shrink-0" />
+                      <div>
+                        <p className="text-sm font-semibold text-foreground">Ejecting your app…</p>
+                        <p className="text-xs text-muted-foreground">Starting the Base44 CLI. If a login prompt appears, follow the steps shown below.</p>
+                      </div>
                     </div>
-                  </div>
+                  )}
                   <LiveTerminal logs={logs} running={true} />
+                  {authPrompt && (
+                    <p className="text-xs text-muted-foreground text-center">
+                      <Loader2 className="inline h-3 w-3 animate-spin mr-1 align-middle" />
+                      Waiting for you to complete authentication… (up to 5 minutes)
+                    </p>
+                  )}
                 </div>
               </Card>
             )}
@@ -553,58 +657,53 @@ export default function Home() {
                           <Key className="h-4 w-4 text-primary" />
                         </div>
                         <div>
-                          <h2 className="font-semibold text-foreground">Base44 credentials</h2>
-                          <p className="text-sm text-muted-foreground mt-0.5">
-                            Found under <strong>API → Documentation</strong> in your Base44 dashboard.
-                          </p>
+                          <h2 className="text-sm font-semibold text-foreground">Base44 credentials</h2>
+                          <p className="text-xs text-muted-foreground mt-0.5">Your app ID and API key from the Base44 dashboard.</p>
                         </div>
                       </div>
                     </div>
+
                     <div className="p-5">
                       <Form {...ejectForm1}>
-                        <form id="eject-step1-form" onSubmit={ejectForm1.handleSubmit(onEjectStep1Submit)} className="space-y-5">
+                        <form id="eject-step1-form" onSubmit={ejectForm1.handleSubmit(onEjectStep1Submit)} className="space-y-4">
                           <FormField control={ejectForm1.control} name="base44AppId" render={({ field }) => (
                             <FormItem>
-                              <div className="flex items-center justify-between">
-                                <FormLabel>App ID</FormLabel>
-                                <HelpLink href="https://app.base44.com">Find in dashboard</HelpLink>
-                              </div>
+                              <FormLabel className="text-xs font-medium">App ID</FormLabel>
                               <FormControl>
                                 <Input placeholder="69dff787f3edfb6f77adcfb0" className="font-mono text-sm" {...field} />
                               </FormControl>
-                              <FieldHint>The alphanumeric ID shown in the SDK snippet (also visible in your editor URL).</FieldHint>
-                              <FormMessage />
+                              <FormMessage className="text-xs" />
+                              <FieldHint>
+                                Find it in <HelpLink href="https://app.base44.com/settings">Base44 → Settings → App ID</HelpLink> or in the URL of your app editor.
+                              </FieldHint>
                             </FormItem>
                           )} />
+
                           <FormField control={ejectForm1.control} name="base44ApiKey" render={({ field }) => (
                             <FormItem>
-                              <div className="flex items-center justify-between">
-                                <FormLabel>API Key</FormLabel>
-                                <HelpLink href="https://app.base44.com">Find under API → Docs</HelpLink>
-                              </div>
+                              <FormLabel className="text-xs font-medium">API Key</FormLabel>
                               <FormControl>
-                                <Input type="password" placeholder="Your Base44 API key" className="font-mono text-sm" {...field} />
+                                <Input type="password" placeholder="••••••••••••••••••••" className="font-mono text-sm" {...field} />
                               </FormControl>
-                              <FieldHint>Used as <code className="bg-muted px-1 rounded text-xs">BASE44_API_KEY</code> to authenticate the CLI non-interactively.</FieldHint>
-                              <FormMessage />
+                              <FormMessage className="text-xs" />
+                              <FieldHint>
+                                <HelpLink href="https://app.base44.com/settings">Base44 → Settings → API Keys</HelpLink>
+                              </FieldHint>
                             </FormItem>
                           )} />
                         </form>
                       </Form>
                     </div>
-                    <div className="p-4 border-t border-border bg-muted/30 rounded-b-xl flex items-center justify-between gap-3">
-                      <div className="flex items-start gap-2 text-xs text-muted-foreground">
-                        <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                        <span>Credentials are never stored — only used for this request.</span>
-                      </div>
-                      <Button type="submit" form="eject-step1-form" className="shrink-0">
-                        Next <ArrowRight className="ml-2 h-4 w-4" />
+
+                    <div className="px-5 pb-5">
+                      <Button form="eject-step1-form" type="submit" className="w-full gap-2">
+                        Continue <ArrowRight className="h-4 w-4" />
                       </Button>
                     </div>
                   </Card>
                 )}
 
-                {/* Step 2: GitHub destination */}
+                {/* Step 2: GitHub */}
                 {ejectStep === 2 && (
                   <Card>
                     <div className="p-5 border-b border-border">
@@ -613,85 +712,78 @@ export default function Home() {
                           <Github className="h-4 w-4 text-primary" />
                         </div>
                         <div>
-                          <h2 className="font-semibold text-foreground">GitHub destination</h2>
-                          <p className="text-sm text-muted-foreground mt-0.5">The repository must already exist on GitHub.</p>
+                          <h2 className="text-sm font-semibold text-foreground">GitHub destination</h2>
+                          <p className="text-xs text-muted-foreground mt-0.5">Where to push the ejected source code.</p>
                         </div>
                       </div>
                     </div>
+
                     <div className="p-5">
                       <Form {...ejectForm2}>
-                        <form id="eject-step2-form" onSubmit={ejectForm2.handleSubmit(onEjectStep2Submit)} className="space-y-5">
+                        <form id="eject-step2-form" onSubmit={ejectForm2.handleSubmit(onEjectStep2Submit)} className="space-y-4">
                           <FormField control={ejectForm2.control} name="githubToken" render={({ field }) => (
                             <FormItem>
-                              <div className="flex items-center justify-between">
-                                <FormLabel>Personal Access Token</FormLabel>
-                                <HelpLink href="https://github.com/settings/tokens/new?scopes=repo&description=Base44+Eject">Create on GitHub</HelpLink>
-                              </div>
+                              <FormLabel className="text-xs font-medium">Personal Access Token</FormLabel>
                               <FormControl>
-                                <Input type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" className="font-mono text-sm" {...field} />
+                                <Input type="password" placeholder="ghp_••••••••••••••" className="font-mono text-sm" {...field} />
                               </FormControl>
-                              <FieldHint>Needs <code className="bg-muted px-1 rounded text-xs">repo</code> scope (classic) or <code className="bg-muted px-1 rounded text-xs">Contents: Read and write</code> (fine-grained).</FieldHint>
-                              <FormMessage />
+                              <FormMessage className="text-xs" />
+                              <FieldHint>
+                                Needs <code className="bg-muted px-1 rounded">repo</code> scope. Create one at{" "}
+                                <HelpLink href="https://github.com/settings/tokens/new?scopes=repo">GitHub → Settings → Tokens</HelpLink>
+                              </FieldHint>
                             </FormItem>
                           )} />
-                          <div className="grid grid-cols-2 gap-4">
+
+                          <div className="grid grid-cols-2 gap-3">
                             <FormField control={ejectForm2.control} name="githubOwner" render={({ field }) => (
                               <FormItem>
-                                <FormLabel>Owner</FormLabel>
-                                <FormControl><Input placeholder="your-username" {...field} /></FormControl>
-                                <FieldHint>GitHub username or org.</FieldHint>
-                                <FormMessage />
+                                <FormLabel className="text-xs font-medium">Owner / Org</FormLabel>
+                                <FormControl><Input placeholder="your-username" className="text-sm" {...field} /></FormControl>
+                                <FormMessage className="text-xs" />
                               </FormItem>
                             )} />
                             <FormField control={ejectForm2.control} name="githubRepo" render={({ field }) => (
                               <FormItem>
-                                <FormLabel>Repository</FormLabel>
-                                <FormControl><Input placeholder="my-base44-app" {...field} /></FormControl>
-                                <FieldHint>Must already exist.</FieldHint>
-                                <FormMessage />
+                                <FormLabel className="text-xs font-medium">Repository</FormLabel>
+                                <FormControl><Input placeholder="my-app" className="text-sm" {...field} /></FormControl>
+                                <FormMessage className="text-xs" />
                               </FormItem>
                             )} />
                           </div>
-                          <div className="grid grid-cols-2 gap-4">
+
+                          <div className="grid grid-cols-2 gap-3">
                             <FormField control={ejectForm2.control} name="branch" render={({ field }) => (
                               <FormItem>
-                                <FormLabel>Branch</FormLabel>
-                                <FormControl><Input placeholder="main" {...field} /></FormControl>
-                                <FormMessage />
+                                <FormLabel className="text-xs font-medium">Branch</FormLabel>
+                                <FormControl><Input placeholder="main" className="text-sm" {...field} /></FormControl>
+                                <FormMessage className="text-xs" />
                               </FormItem>
                             )} />
                             <FormField control={ejectForm2.control} name="commitMessage" render={({ field }) => (
                               <FormItem>
-                                <FormLabel>Commit message</FormLabel>
-                                <FormControl><Input placeholder="feat: eject from Base44" {...field} /></FormControl>
-                                <FormMessage />
+                                <FormLabel className="text-xs font-medium">Commit message</FormLabel>
+                                <FormControl><Input className="text-sm" {...field} /></FormControl>
+                                <FormMessage className="text-xs" />
                               </FormItem>
                             )} />
                           </div>
                         </form>
                       </Form>
                     </div>
-                    <div className="p-4 border-t border-border bg-muted/30 rounded-b-xl flex items-center justify-between gap-3">
-                      <Button variant="outline" onClick={() => setEjectStep(1)}>
-                        <ArrowLeft className="mr-2 h-4 w-4" /> Back
+
+                    <div className="px-5 pb-5 flex gap-3">
+                      <Button variant="outline" className="gap-2" onClick={() => setEjectStep(1)}>
+                        <ArrowLeft className="h-4 w-4" /> Back
                       </Button>
-                      <Button type="submit" form="eject-step2-form">
-                        <Terminal className="mr-2 h-4 w-4" />Eject &amp; Push
+                      <Button form="eject-step2-form" type="submit" className="flex-1 gap-2">
+                        <Zap className="h-4 w-4" /> Eject & push to GitHub
                       </Button>
                     </div>
                   </Card>
                 )}
               </>
             )}
-
-            <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
-              <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
-              <p className="text-xs text-amber-800 leading-relaxed">
-                <strong>About the backend:</strong> The exported code includes your full React/JSX frontend.
-                The backend logic runs via <code className="bg-amber-100 px-1 rounded">base44-sdk</code> which still calls Base44's servers —
-                a Base44 account is needed to run your app's data and auth.
-              </p>
-            </div>
           </div>
         )}
 
@@ -700,245 +792,234 @@ export default function Home() {
         ══════════════════════════════════════════ */}
         {tab === "manual" && (
           <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <div className="flex items-start gap-2.5 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
-              <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
-              <p className="text-sm text-emerald-800 leading-relaxed">
-                These methods export your <strong>full React/JSX source code</strong> without touching our server — everything runs in your browser or terminal.
+            <div className="flex items-start gap-3 bg-muted/50 border border-border rounded-xl p-4">
+              <Puzzle className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                These methods let you export or view code without running the CLI. Useful if the automated eject doesn't work for your app.
               </p>
             </div>
 
             <Collapsible
-              icon={<Puzzle className="h-5 w-5 text-emerald-600" />}
-              badge="Recommended — No server needed"
-              title="Chrome Extension: Base44 Downloader"
-              desc="One-click ZIP export directly from the Base44 editor. Works on the free plan."
-              defaultOpen={true}
+              icon={<FileCode2 className="h-4 w-4 text-emerald-600" />}
+              badge="Chrome extension"
+              title="Base44 Exporter"
+              desc="One-click export of all source files from Base44's editor using a browser extension."
+              defaultOpen
             >
-              <div className="space-y-3">
-                <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Step 1 — Install the extension</p>
-                <div className="space-y-1.5">
-                  <a href="https://chromewebstore.google.com/detail/base44-downloader/ngbhbpaflbegfjgaibhldjlmmfonpief"
-                    target="_blank" rel="noreferrer"
-                    className="flex items-center gap-2 text-sm text-primary hover:underline font-medium">
-                    Base44 Downloader — Chrome Web Store <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                  <p className="text-xs text-muted-foreground">
-                    Alternative:{" "}
-                    <a href="https://chromewebstore.google.com/detail/vibeapp-exporter-base44-d/ccmjgcjhglnfahjppjinaegigjoabjjb"
-                      target="_blank" rel="noreferrer" className="text-primary hover:underline">VibeApp Exporter</a> — exports Base44, Lovable, and Bolt.
-                  </p>
-                </div>
-                <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Step 2 — Export from Base44</p>
-                <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside leading-relaxed">
-                  <li>Open your app in <strong className="text-foreground">app.base44.com</strong></li>
-                  <li>Click the <strong className="text-foreground">Code tab</strong> (<code className="bg-muted px-1 rounded">{`> _`}</code>)</li>
-                  <li>Click the extension icon in your Chrome toolbar → <strong className="text-foreground">Export as ZIP</strong></li>
-                </ol>
-                <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Step 3 — Push to GitHub</p>
-                <CodeBlock code={`unzip your-base44-project.zip -d my-project
-cd my-project
-git init
-git add .
-git commit -m "feat: export from Base44"
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-git branch -M main
-git push -u origin main`} />
-              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Install the <strong>Base44 Exporter</strong> extension (if available), open your Base44 project in the editor, and click the extension icon to download all source files as a ZIP.
+              </p>
+              <CodeBlock code="# Once you have the ZIP, push to GitHub:\nunzip base44-export.zip -d my-app\ncd my-app\ngit init && git add . && git commit -m 'feat: import from Base44'\ngit remote add origin https://github.com/you/my-app.git\ngit push -u origin main" />
             </Collapsible>
 
             <Collapsible
-              icon={<Copy className="h-5 w-5 text-emerald-600" />}
-              badge="Always Free — Manual"
-              title="Copy-paste from Code Tab"
-              desc="No tools needed. Open each file in the Base44 editor and copy it locally."
+              icon={<Terminal className="h-4 w-4 text-emerald-600" />}
+              badge="CLI — local machine"
+              title="Run base44 eject locally"
+              desc="Run the CLI on your own machine where you're already logged in to Base44."
             >
-              <div className="space-y-3">
-                <ol className="text-xs text-muted-foreground space-y-1.5 list-decimal list-inside leading-relaxed">
-                  <li>Open your app → click the <strong className="text-foreground">Code tab</strong></li>
-                  <li>Click <strong className="text-foreground">"See all files"</strong> to view the full tree</li>
-                  <li>Open each file, select all, copy, paste it locally at the same path</li>
-                  <li>Repeat for every file</li>
-                </ol>
-                <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
-                  <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0 mt-0.5" />
-                  <p className="text-xs text-amber-800">Tedious for large projects. Use the Chrome extension or the Eject tab instead.</p>
-                </div>
-                <CodeBlock code={`git init
-git add .
-git commit -m "feat: export from Base44"
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-git branch -M main
-git push -u origin main`} />
-              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                If you've used the Base44 CLI before, you may already be authenticated. Run:
+              </p>
+              <CodeBlock code="npx base44 eject --app-id YOUR_APP_ID --path ./my-app --yes" />
+              <p className="text-xs text-muted-foreground">Then push to GitHub normally with <code className="bg-muted px-1 rounded">git push</code>.</p>
+            </Collapsible>
+
+            <Collapsible
+              icon={<FolderOpen className="h-4 w-4 text-emerald-600" />}
+              badge="Copy–paste"
+              title="Manual copy from editor"
+              desc="Open each file in Base44's code editor and copy the source manually."
+            >
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                In your Base44 app, go to <strong>Settings → Developer → Source files</strong> (or click "View code" in the editor). Copy each file and paste into your local project.
+              </p>
             </Collapsible>
           </div>
         )}
 
         {/* ══════════════════════════════════════════
-            TAB: SCHEMA & CONFIG (metadata push)
+            TAB: SCHEMA & CONFIG
         ══════════════════════════════════════════ */}
         {tab === "metadata" && (
           <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <div className="flex items-start gap-2.5 bg-blue-50 border border-blue-200 rounded-xl p-4">
-              <AlertCircle className="h-4 w-4 text-blue-600 shrink-0 mt-0.5" />
-              <p className="text-sm text-blue-800 leading-relaxed">
-                This pushes your app's <strong>entity schemas, TypeScript types, OpenAPI spec, and SDK config</strong>.
-                For full JSX source code use{" "}
-                <button onClick={() => setTab("eject")} className="underline font-semibold cursor-pointer">Eject Full Code</button>.
-              </p>
+            <div className="flex items-start gap-3 bg-primary/5 border border-primary/20 rounded-xl p-4">
+              <Database className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-foreground">Push schema & config to GitHub</p>
+                <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+                  Fetches your Base44 entity schemas, settings, and metadata via the API and commits them to GitHub as JSON. Useful for version-controlling your data model.
+                </p>
+              </div>
             </div>
 
-            {metaStep === 1 && (
-              <Card>
-                <div className="p-5 border-b border-border">
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 bg-primary/10 rounded-lg flex items-center justify-center shrink-0">
-                      <Key className="h-4 w-4 text-primary" />
-                    </div>
-                    <div>
-                      <h2 className="font-semibold text-foreground">Connect your Base44 app</h2>
-                      <p className="text-sm text-muted-foreground mt-0.5">Credentials are in your Base44 dashboard under API → Documentation.</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="p-5">
-                  <Form {...form1}>
-                    <form id="meta-form-1" onSubmit={form1.handleSubmit(onPreviewSubmit)} className="space-y-5">
-                      <FormField control={form1.control} name="base44AppId" render={({ field }) => (
-                        <FormItem>
-                          <div className="flex items-center justify-between">
-                            <FormLabel>App ID</FormLabel>
-                            <HelpLink href="https://app.base44.com">Find in dashboard</HelpLink>
-                          </div>
-                          <FormControl><Input placeholder="69dff787f3edfb6f77adcfb0" className="font-mono text-sm" {...field} /></FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )} />
-                      <FormField control={form1.control} name="base44ApiKey" render={({ field }) => (
-                        <FormItem>
-                          <div className="flex items-center justify-between">
-                            <FormLabel>API Key</FormLabel>
-                            <HelpLink href="https://app.base44.com">Find under API → Docs</HelpLink>
-                          </div>
-                          <FormControl><Input type="password" placeholder="Your Base44 API key" className="font-mono text-sm" {...field} /></FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )} />
-                      <FormField control={form1.control} name="base44AppUrl" render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>App URL <span className="text-xs font-normal text-muted-foreground">(optional)</span></FormLabel>
-                          <FormControl><Input placeholder="https://my-app.base44.app" className="font-mono text-sm" {...field} /></FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )} />
-                    </form>
-                  </Form>
-                </div>
-                <div className="p-4 border-t border-border bg-muted/30 rounded-b-xl flex justify-end">
-                  <Button type="submit" form="meta-form-1" disabled={previewMutation.isPending}>
-                    {previewMutation.isPending
-                      ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Connecting…</>
-                      : <>Preview files <ArrowRight className="ml-2 h-4 w-4" /></>}
-                  </Button>
-                </div>
-              </Card>
-            )}
-
-            {metaStep === 2 && (
-              <div className="space-y-5">
-                <Card>
-                  <div className="p-4 border-b border-border flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <FolderOpen className="h-4 w-4 text-primary" />
-                      <span className="text-sm font-semibold text-foreground">{previewData?.appName ?? "App files"}</span>
-                    </div>
-                    <span className="text-xs font-medium bg-primary/10 text-primary px-2 py-0.5 rounded-full">{previewData?.files.length ?? 0} files</span>
-                  </div>
-                  <ScrollArea className="h-52">
-                    <div className="p-2">
-                      {previewData?.files.length === 0
-                        ? <div className="flex flex-col items-center justify-center h-40 text-muted-foreground gap-2"><File className="h-8 w-8 opacity-30" /><p className="text-sm">No files found.</p></div>
-                        : previewData?.files.map((file, idx) => <FileRow key={idx} path={file.path} size={file.size ?? 0} type={file.type ?? "file"} />)}
-                    </div>
-                  </ScrollArea>
-                </Card>
-
-                <Card>
-                  <div className="p-5 border-b border-border">
-                    <div className="flex items-start gap-3">
-                      <div className="w-8 h-8 bg-primary/10 rounded-lg flex items-center justify-center shrink-0">
-                        <Github className="h-4 w-4 text-primary" />
-                      </div>
-                      <div>
-                        <h2 className="font-semibold text-foreground">GitHub destination</h2>
-                        <p className="text-sm text-muted-foreground mt-0.5">Repository must already exist.</p>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="p-5">
-                    <Form {...form2}>
-                      <form id="meta-form-2" onSubmit={form2.handleSubmit(onPushSubmit)} className="space-y-5">
-                        <FormField control={form2.control} name="githubToken" render={({ field }) => (
-                          <FormItem>
-                            <div className="flex items-center justify-between">
-                              <FormLabel>Personal Access Token</FormLabel>
-                              <HelpLink href="https://github.com/settings/tokens/new?scopes=repo">Create on GitHub</HelpLink>
-                            </div>
-                            <FormControl><Input type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" className="font-mono text-sm" {...field} /></FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )} />
-                        <div className="grid grid-cols-2 gap-4">
-                          <FormField control={form2.control} name="githubOwner" render={({ field }) => (
-                            <FormItem><FormLabel>Owner</FormLabel><FormControl><Input placeholder="username" {...field} /></FormControl><FormMessage /></FormItem>
-                          )} />
-                          <FormField control={form2.control} name="githubRepo" render={({ field }) => (
-                            <FormItem><FormLabel>Repository</FormLabel><FormControl><Input placeholder="my-base44-app" {...field} /></FormControl><FormMessage /></FormItem>
-                          )} />
-                        </div>
-                        <div className="grid grid-cols-2 gap-4">
-                          <FormField control={form2.control} name="branch" render={({ field }) => (
-                            <FormItem><FormLabel>Branch</FormLabel><FormControl><Input placeholder="main" {...field} /></FormControl><FormMessage /></FormItem>
-                          )} />
-                          <FormField control={form2.control} name="commitMessage" render={({ field }) => (
-                            <FormItem><FormLabel>Commit message</FormLabel><FormControl><Input placeholder="chore: sync from Base44" {...field} /></FormControl><FormMessage /></FormItem>
-                          )} />
-                        </div>
-                      </form>
-                    </Form>
-                  </div>
-                  <div className="p-4 border-t border-border bg-muted/30 rounded-b-xl flex items-center justify-between gap-3">
-                    <Button variant="outline" onClick={() => setMetaStep(1)}><ArrowLeft className="mr-2 h-4 w-4" />Back</Button>
-                    <Button type="submit" form="meta-form-2" disabled={pushMutation.isPending || (previewData?.files.length === 0)}>
-                      {pushMutation.isPending
-                        ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Pushing…</>
-                        : <>Push to GitHub <ArrowRight className="ml-2 h-4 w-4" /></>}
-                    </Button>
-                  </div>
-                </Card>
-              </div>
-            )}
-
+            {/* Step 3: Done */}
             {metaStep === 3 && pushResult && (
               <Card>
-                <div className="p-10 flex flex-col items-center text-center gap-5">
+                <div className="p-8 flex flex-col items-center text-center gap-5">
                   <div className="w-16 h-16 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-center">
                     <CheckCircle2 className="h-8 w-8 text-emerald-600" />
                   </div>
-                  <div className="space-y-1.5">
-                    <h2 className="text-xl font-bold text-foreground">Push successful</h2>
+                  <div className="space-y-1">
+                    <h2 className="text-xl font-bold text-foreground">Pushed successfully!</h2>
                     <p className="text-muted-foreground text-sm">{pushResult.count} file{pushResult.count !== 1 ? "s" : ""} committed to GitHub.</p>
                   </div>
                   <a href={pushResult.url} target="_blank" rel="noreferrer"
                     className="inline-flex items-center gap-2.5 px-5 py-2.5 bg-foreground text-background rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">
-                    <Github className="h-4 w-4" />View commit on GitHub<ExternalLink className="h-3.5 w-3.5 opacity-60" />
+                    <Github className="h-4 w-4" />
+                    View commit on GitHub
+                    <ExternalLink className="h-3.5 w-3.5 opacity-60" />
                   </a>
-                  <button
-                    onClick={() => { setMetaStep(1); setPushResult(null); setPreviewData(null); form1.reset(); form2.reset(); previewMutation.reset(); pushMutation.reset(); }}
-                    className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                  >Push another app</button>
+                  <button onClick={() => { setMetaStep(1); setPushResult(null); form1.reset(); form2.reset(); }}
+                    className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+                    Push again
+                  </button>
                 </div>
               </Card>
+            )}
+
+            {metaStep < 3 && (
+              <>
+                {/* Step 1 */}
+                {metaStep === 1 && (
+                  <Card>
+                    <div className="p-5 border-b border-border">
+                      <div className="flex items-start gap-3">
+                        <div className="w-8 h-8 bg-primary/10 rounded-lg flex items-center justify-center shrink-0">
+                          <Key className="h-4 w-4 text-primary" />
+                        </div>
+                        <div>
+                          <h2 className="text-sm font-semibold text-foreground">Connect to Base44</h2>
+                          <p className="text-xs text-muted-foreground mt-0.5">Fetch schema and metadata from your app.</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="p-5">
+                      <Form {...form1}>
+                        <form onSubmit={form1.handleSubmit(onPreviewSubmit)} className="space-y-4">
+                          <FormField control={form1.control} name="base44AppId" render={({ field }) => (
+                            <FormItem>
+                              <FormLabel className="text-xs font-medium">App ID</FormLabel>
+                              <FormControl><Input placeholder="69dff787f3edfb6f77adcfb0" className="font-mono text-sm" {...field} /></FormControl>
+                              <FormMessage className="text-xs" />
+                            </FormItem>
+                          )} />
+                          <FormField control={form1.control} name="base44ApiKey" render={({ field }) => (
+                            <FormItem>
+                              <FormLabel className="text-xs font-medium">API Key</FormLabel>
+                              <FormControl><Input type="password" placeholder="••••••••••••••••••••" className="font-mono text-sm" {...field} /></FormControl>
+                              <FormMessage className="text-xs" />
+                            </FormItem>
+                          )} />
+                          <FormField control={form1.control} name="base44AppUrl" render={({ field }) => (
+                            <FormItem>
+                              <FormLabel className="text-xs font-medium">App URL <span className="text-muted-foreground font-normal">(optional)</span></FormLabel>
+                              <FormControl><Input placeholder="https://yourapp.base44.app" className="text-sm" {...field} /></FormControl>
+                              <FormMessage className="text-xs" />
+                            </FormItem>
+                          )} />
+                          <Button type="submit" className="w-full gap-2" disabled={previewMutation.isPending}>
+                            {previewMutation.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Fetching…</> : <>Fetch files <ArrowRight className="h-4 w-4" /></>}
+                          </Button>
+                        </form>
+                      </Form>
+                    </div>
+                  </Card>
+                )}
+
+                {/* Step 2 */}
+                {metaStep === 2 && previewData && (
+                  <>
+                    <Card>
+                      <div className="p-5 border-b border-border">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center justify-center shrink-0">
+                            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                          </div>
+                          <div>
+                            <h2 className="text-sm font-semibold text-foreground">Files ready</h2>
+                            <p className="text-xs text-muted-foreground">{previewData.files.length} file{previewData.files.length !== 1 ? "s" : ""} fetched from Base44</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="p-3 max-h-52 overflow-y-auto space-y-0.5">
+                        {previewData.files.map((f) => (
+                          <FileRow key={f.path} path={f.path} size={f.size} type={f.type} />
+                        ))}
+                      </div>
+                    </Card>
+
+                    <Card>
+                      <div className="p-5 border-b border-border">
+                        <div className="flex items-start gap-3">
+                          <div className="w-8 h-8 bg-primary/10 rounded-lg flex items-center justify-center shrink-0">
+                            <Github className="h-4 w-4 text-primary" />
+                          </div>
+                          <div>
+                            <h2 className="text-sm font-semibold text-foreground">Push to GitHub</h2>
+                            <p className="text-xs text-muted-foreground mt-0.5">Choose a repository to commit these files.</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="p-5">
+                        <Form {...form2}>
+                          <form onSubmit={form2.handleSubmit(onPushSubmit)} className="space-y-4">
+                            <FormField control={form2.control} name="githubToken" render={({ field }) => (
+                              <FormItem>
+                                <FormLabel className="text-xs font-medium">Personal Access Token</FormLabel>
+                                <FormControl><Input type="password" placeholder="ghp_••••••••••••••" className="font-mono text-sm" {...field} /></FormControl>
+                                <FormMessage className="text-xs" />
+                              </FormItem>
+                            )} />
+                            <div className="grid grid-cols-2 gap-3">
+                              <FormField control={form2.control} name="githubOwner" render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel className="text-xs font-medium">Owner</FormLabel>
+                                  <FormControl><Input placeholder="your-username" className="text-sm" {...field} /></FormControl>
+                                  <FormMessage className="text-xs" />
+                                </FormItem>
+                              )} />
+                              <FormField control={form2.control} name="githubRepo" render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel className="text-xs font-medium">Repository</FormLabel>
+                                  <FormControl><Input placeholder="my-app" className="text-sm" {...field} /></FormControl>
+                                  <FormMessage className="text-xs" />
+                                </FormItem>
+                              )} />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                              <FormField control={form2.control} name="branch" render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel className="text-xs font-medium">Branch</FormLabel>
+                                  <FormControl><Input placeholder="main" className="text-sm" {...field} /></FormControl>
+                                  <FormMessage className="text-xs" />
+                                </FormItem>
+                              )} />
+                              <FormField control={form2.control} name="commitMessage" render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel className="text-xs font-medium">Commit message</FormLabel>
+                                  <FormControl><Input className="text-sm" {...field} /></FormControl>
+                                  <FormMessage className="text-xs" />
+                                </FormItem>
+                              )} />
+                            </div>
+                            <div className="flex gap-3 pt-1">
+                              <Button variant="outline" type="button" className="gap-2" onClick={() => setMetaStep(1)}>
+                                <ArrowLeft className="h-4 w-4" /> Back
+                              </Button>
+                              <Button type="submit" className="flex-1 gap-2" disabled={pushMutation.isPending}>
+                                {pushMutation.isPending
+                                  ? <><Loader2 className="h-4 w-4 animate-spin" /> Pushing…</>
+                                  : <><Github className="h-4 w-4" /> Push to GitHub</>}
+                              </Button>
+                            </div>
+                          </form>
+                        </Form>
+                      </div>
+                    </Card>
+                  </>
+                )}
+              </>
             )}
           </div>
         )}

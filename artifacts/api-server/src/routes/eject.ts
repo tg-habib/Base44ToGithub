@@ -38,11 +38,26 @@ async function walkDir(dir: string): Promise<Array<{ path: string; content: stri
   return files;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Detect Base44 device-code auth prompts in CLI output lines.
+   Emits a special `auth` SSE event with { url, code } when found.
+────────────────────────────────────────────────────────────────────────── */
+function parseAuthPrompt(lines: string[]): { url?: string; code?: string } {
+  let url: string | undefined;
+  let code: string | undefined;
+  for (const line of lines) {
+    const urlMatch = line.match(/https:\/\/\S+device\S*/i);
+    if (urlMatch) url = urlMatch[0].replace(/[.,;]$/, "");
+    const codeMatch = line.match(/[Vv]erification\s+code[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4})/);
+    if (codeMatch) code = codeMatch[1];
+  }
+  return { url, code };
+}
+
 const router: IRouter = Router();
 
 /* ─────────────────────────────────────────────────────────────────────────
    POST /eject/stream  — Server-Sent Events endpoint
-   Streams base44 eject output line-by-line, then pushes to GitHub.
 ────────────────────────────────────────────────────────────────────────── */
 router.post("/eject/stream", async (req, res): Promise<void> => {
   const parsed = EjectAndPushBody.safeParse(req.body);
@@ -68,6 +83,7 @@ router.post("/eject/stream", async (req, res): Promise<void> => {
   const sendLog = (line: string) => sendEvent("log", { line: line.trimEnd() });
   const sendError = (message: string) => sendEvent("error", { message });
   const sendResult = (data: object) => sendEvent("result", data);
+  const sendAuth = (url: string, code: string) => sendEvent("auth", { url, code });
 
   let tmpDir: string | null = null;
 
@@ -100,16 +116,45 @@ router.post("/eject/stream", async (req, res): Promise<void> => {
       };
       req.on("close", onClientClose);
 
-      const flushLines = (chunk: Buffer, tag: "stdout" | "stderr") => {
-        const text = chunk.toString("utf8");
-        for (const line of text.split(/\r?\n/)) {
-          const trimmed = line.trim();
-          if (trimmed) sendLog(`${tag === "stderr" ? "  " : ""}${line}`);
+      // Buffer recent lines to detect multi-line auth prompts
+      const recentLines: string[] = [];
+      let authSent = false;
+
+      const processLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+
+        sendLog(line);
+
+        // Collect lines for auth detection
+        recentLines.push(trimmed);
+        if (recentLines.length > 10) recentLines.shift();
+
+        // Detect device-code auth prompt and emit once
+        if (!authSent && (
+          trimmed.includes("login/device") ||
+          trimmed.toLowerCase().includes("verification code")
+        )) {
+          const { url, code } = parseAuthPrompt(recentLines);
+          if (url || code) {
+            authSent = true;
+            sendAuth(
+              url ?? "https://app.base44.com/login/device",
+              code ?? ""
+            );
+          }
         }
       };
 
-      proc.stdout.on("data", (chunk: Buffer) => flushLines(chunk, "stdout"));
-      proc.stderr.on("data", (chunk: Buffer) => flushLines(chunk, "stderr"));
+      const flushChunk = (chunk: Buffer) => {
+        const text = chunk.toString("utf8");
+        for (const line of text.split(/\r?\n/)) {
+          processLine(line);
+        }
+      };
+
+      proc.stdout.on("data", flushChunk);
+      proc.stderr.on("data", flushChunk);
 
       proc.on("error", (err) => {
         req.off("close", onClientClose);
@@ -125,11 +170,11 @@ router.post("/eject/stream", async (req, res): Promise<void> => {
         }
       });
 
-      // safety timeout
+      // 5-minute timeout — enough time for the user to complete device-code auth
       setTimeout(() => {
         proc.kill("SIGTERM");
-        reject(new Error("base44 eject timed out after 120s"));
-      }, 120_000);
+        reject(new Error("Timed out after 5 minutes. If you were waiting to authenticate, please try again and complete the login step within 5 minutes."));
+      }, 300_000);
     });
 
     sendLog("");
@@ -138,7 +183,7 @@ router.post("/eject/stream", async (req, res): Promise<void> => {
     const files = await walkDir(tmpDir);
 
     if (files.length === 0) {
-      sendError("base44 eject produced no files. Check your App ID and API Key.");
+      sendError("base44 eject produced no files. Check your App ID and make sure authentication succeeded.");
       res.end();
       cleanup();
       return;
@@ -214,7 +259,7 @@ router.post("/eject", async (req, res): Promise<void> => {
       proc.stderr.on("data", (c: Buffer) => cliLogs.push(c.toString()));
       proc.on("error", reject);
       proc.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
-      setTimeout(() => { proc.kill(); reject(new Error("Timeout")); }, 120_000);
+      setTimeout(() => { proc.kill(); reject(new Error("Timeout")); }, 300_000);
     });
 
     const files = await walkDir(tmpDir);
