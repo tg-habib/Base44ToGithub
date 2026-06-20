@@ -1,10 +1,17 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
 const CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
+
+// Startup diagnostic — never logs the actual values
+logger.info(
+  { hasClientId: !!CLIENT_ID, hasClientSecret: !!CLIENT_SECRET },
+  "GitHub OAuth config loaded",
+);
 
 /**
  * POST /auth/device/start
@@ -77,6 +84,9 @@ router.post("/auth/device/poll", async (req: Request, res: Response) => {
   }
 
   try {
+    const hasSecret = !!CLIENT_SECRET;
+    logger.info({ hasSecret, clientIdPrefix: CLIENT_ID?.slice(0, 8) }, "polling GitHub for token");
+
     const body: Record<string, string> = {
       client_id: CLIENT_ID,
       device_code,
@@ -98,6 +108,8 @@ router.post("/auth/device/poll", async (req: Request, res: Response) => {
       error?: string;
       error_description?: string;
     };
+
+    logger.info({ status: r.status, error: data.error, hasToken: !!data.access_token }, "GitHub poll response");
 
     if (data.access_token) {
       let login = "";
