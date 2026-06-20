@@ -4,6 +4,7 @@ import type { Request, Response } from "express";
 const router = Router();
 
 const CLIENT_ID = process.env.GITHUB_CLIENT_ID;
+const CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 
 /**
  * POST /auth/device/start
@@ -76,14 +77,18 @@ router.post("/auth/device/poll", async (req: Request, res: Response) => {
   }
 
   try {
+    const body: Record<string, string> = {
+      client_id: CLIENT_ID,
+      device_code,
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    };
+    // GitHub OAuth Apps require the client_secret in the token exchange step
+    if (CLIENT_SECRET) body.client_secret = CLIENT_SECRET;
+
     const r = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        client_id: CLIENT_ID,
-        device_code,
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = (await r.json()) as {
@@ -91,6 +96,7 @@ router.post("/auth/device/poll", async (req: Request, res: Response) => {
       token_type?: string;
       scope?: string;
       error?: string;
+      error_description?: string;
     };
 
     if (data.access_token) {
@@ -114,7 +120,13 @@ router.post("/auth/device/poll", async (req: Request, res: Response) => {
       return;
     }
 
-    if (data.error === "authorization_pending" || data.error === "slow_down") {
+    if (data.error === "authorization_pending") {
+      res.json({ status: "pending" });
+      return;
+    }
+
+    if (data.error === "slow_down") {
+      // GitHub wants us to slow down; still pending but we acknowledge it
       res.json({ status: "pending" });
       return;
     }
@@ -129,7 +141,13 @@ router.post("/auth/device/poll", async (req: Request, res: Response) => {
       return;
     }
 
-    res.json({ status: "pending" });
+    // Any other error (e.g. incorrect_client_credentials, bad_verification_code)
+    // surface it rather than silently looping as "pending"
+    res.json({
+      status: "error",
+      error: data.error ?? "unknown_error",
+      error_description: data.error_description ?? "GitHub returned an unexpected error during token exchange.",
+    });
   } catch {
     res.status(500).json({ error: "Failed to poll device flow" });
   }

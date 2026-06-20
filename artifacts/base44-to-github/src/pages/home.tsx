@@ -394,7 +394,7 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ device_code: deviceFlow.device_code }),
         });
-        const data = await res.json() as { status: string; token?: string; login?: string; avatar_url?: string };
+        const data = await res.json() as { status: string; token?: string; login?: string; avatar_url?: string; error?: string; error_description?: string };
         if (data.status === "success" && data.token) {
           setGhSession({ token: data.token, login: data.login ?? "", avatar_url: data.avatar_url ?? "" });
           setDeviceFlow(null);
@@ -403,6 +403,14 @@ export default function Home() {
           setDeviceFlow(null);
           setDevicePolling(false);
           toast({ title: `GitHub auth ${data.status}`, description: "Please try connecting again.", variant: "destructive" });
+        } else if (data.status === "error") {
+          setDeviceFlow(null);
+          setDevicePolling(false);
+          toast({
+            title: "GitHub auth failed",
+            description: data.error_description ?? data.error ?? "Unexpected error from GitHub. Make sure GITHUB_CLIENT_SECRET is set in Replit secrets.",
+            variant: "destructive",
+          });
         }
       } catch { /* noop */ }
     }, (deviceFlow.interval || 5) * 1000);
