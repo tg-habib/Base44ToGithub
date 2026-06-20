@@ -346,6 +346,60 @@ export default function Home() {
     defaultValues: { githubToken: "", githubOwner: "", githubRepo: "", branch: "main", commitMessage: "feat: eject from Base44" },
   });
 
+  /* ── GitHub OAuth Device Flow ── */
+  const [ghSession, setGhSession] = useState<{ token: string; login: string; avatar_url: string } | null>(null);
+  const [deviceFlow, setDeviceFlow] = useState<{ user_code: string; verification_uri: string; device_code: string; interval: number } | null>(null);
+  const [devicePolling, setDevicePolling] = useState(false);
+  const [useManualToken, setUseManualToken] = useState(false);
+
+  useEffect(() => {
+    if (ghSession) ejectForm2.setValue("githubToken", ghSession.token);
+  }, [ghSession, ejectForm2]);
+
+  useEffect(() => {
+    if (!devicePolling || !deviceFlow) return;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch("/api/auth/device/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_code: deviceFlow.device_code }),
+        });
+        const data = await res.json() as { status: string; token?: string; login?: string; avatar_url?: string };
+        if (data.status === "success" && data.token) {
+          setGhSession({ token: data.token, login: data.login ?? "", avatar_url: data.avatar_url ?? "" });
+          setDeviceFlow(null);
+          setDevicePolling(false);
+        } else if (data.status === "expired" || data.status === "denied") {
+          setDeviceFlow(null);
+          setDevicePolling(false);
+          toast({ title: `GitHub auth ${data.status}`, description: "Please try connecting again.", variant: "destructive" });
+        }
+      } catch { /* noop */ }
+    }, (deviceFlow.interval || 5) * 1000);
+    return () => clearInterval(id);
+  }, [devicePolling, deviceFlow]);
+
+  const startDeviceFlow = async () => {
+    try {
+      const res = await fetch("/api/auth/device/start", { method: "POST", headers: { "Content-Type": "application/json" } });
+      const data = await res.json() as { device_code?: string; user_code?: string; verification_uri?: string; interval?: number; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? "Failed to start device flow");
+      setDeviceFlow({ device_code: data.device_code!, user_code: data.user_code!, verification_uri: data.verification_uri!, interval: data.interval ?? 5 });
+      setDevicePolling(true);
+    } catch (err) {
+      toast({ title: "GitHub connection failed", description: err instanceof Error ? err.message : "Unknown error", variant: "destructive" });
+    }
+  };
+
+  const disconnectGitHub = () => {
+    setGhSession(null);
+    setDeviceFlow(null);
+    setDevicePolling(false);
+    setUseManualToken(false);
+    ejectForm2.setValue("githubToken", "");
+  };
+
   const onEjectStep1Submit = (values: z.infer<typeof ejectStep1Schema>) => {
     setEjectStep1Data(values);
     setEjectStep(2);
@@ -618,19 +672,78 @@ export default function Home() {
                     <div className="p-5">
                       <Form {...ejectForm2}>
                         <form id="eject-step2-form" onSubmit={ejectForm2.handleSubmit(onEjectStep2Submit)} className="space-y-4">
-                          <FormField control={ejectForm2.control} name="githubToken" render={({ field }) => (
-                            <FormItem>
-                              <FormLabel className="text-xs font-medium">Personal Access Token</FormLabel>
-                              <FormControl>
-                                <Input type="password" placeholder="ghp_••••••••••••••" className="font-mono text-sm" {...field} />
-                              </FormControl>
-                              <FormMessage className="text-xs" />
-                              <FieldHint>
-                                Needs <code className="bg-muted px-1 rounded">repo</code> scope. Create one at{" "}
-                                <HelpLink href="https://github.com/settings/tokens/new?scopes=repo">GitHub → Settings → Tokens</HelpLink>
-                              </FieldHint>
-                            </FormItem>
-                          )} />
+                          {/* ── GitHub auth: device flow or manual token ── */}
+                          {ghSession && !useManualToken ? (
+                            <div className="flex items-center gap-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+                              <img src={ghSession.avatar_url} alt={ghSession.login} className="w-7 h-7 rounded-full shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-semibold text-emerald-800">Connected to GitHub</p>
+                                <p className="text-xs text-emerald-700 truncate">@{ghSession.login}</p>
+                              </div>
+                              <button type="button" onClick={disconnectGitHub}
+                                className="text-xs text-emerald-700 hover:text-emerald-900 underline underline-offset-2 shrink-0">
+                                Disconnect
+                              </button>
+                            </div>
+                          ) : deviceFlow ? (
+                            <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
+                              <div className="flex items-center gap-2">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-600 shrink-0" />
+                                <p className="text-xs font-semibold text-amber-800">Waiting for GitHub authorization…</p>
+                              </div>
+                              <div className="text-center">
+                                <p className="text-xs text-amber-700 mb-2">
+                                  1. Open{" "}
+                                  <a href={deviceFlow.verification_uri} target="_blank" rel="noreferrer"
+                                    className="font-semibold underline underline-offset-2">
+                                    github.com/login/device
+                                  </a>
+                                </p>
+                                <p className="text-xs text-amber-700 mb-2">2. Enter this code:</p>
+                                <div className="flex items-center gap-2 justify-center">
+                                  <code className="text-xl font-mono font-bold tracking-widest text-amber-900 bg-amber-100 px-4 py-2 rounded-lg border border-amber-300">
+                                    {deviceFlow.user_code}
+                                  </code>
+                                  <button type="button" onClick={() => navigator.clipboard.writeText(deviceFlow.user_code)}
+                                    className="p-1.5 rounded-md hover:bg-amber-200 transition-colors" title="Copy code">
+                                    <Copy className="h-3.5 w-3.5 text-amber-700" />
+                                  </button>
+                                </div>
+                              </div>
+                              <button type="button" onClick={() => { setDeviceFlow(null); setDevicePolling(false); }}
+                                className="text-xs text-amber-700 hover:text-amber-900 underline underline-offset-2 w-full text-center">
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              <Button type="button" variant="outline" className="w-full gap-2 border-[#24292f] text-[#24292f] hover:bg-[#24292f] hover:text-white transition-colors" onClick={startDeviceFlow}>
+                                <Github className="h-4 w-4" />
+                                Connect GitHub
+                              </Button>
+                              {!useManualToken && (
+                                <button type="button" onClick={() => setUseManualToken(true)}
+                                  className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 w-full text-center transition-colors">
+                                  Use a Personal Access Token instead
+                                </button>
+                              )}
+                              {useManualToken && (
+                                <FormField control={ejectForm2.control} name="githubToken" render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel className="text-xs font-medium">Personal Access Token</FormLabel>
+                                    <FormControl>
+                                      <Input type="password" placeholder="ghp_••••••••••••••" className="font-mono text-sm" {...field} />
+                                    </FormControl>
+                                    <FormMessage className="text-xs" />
+                                    <FieldHint>
+                                      Needs <code className="bg-muted px-1 rounded">repo</code> scope. Create one at{" "}
+                                      <HelpLink href="https://github.com/settings/tokens/new?scopes=repo">GitHub → Settings → Tokens</HelpLink>
+                                    </FieldHint>
+                                  </FormItem>
+                                )} />
+                              )}
+                            </div>
+                          )}
 
                           <div className="grid grid-cols-2 gap-3">
                             <FormField control={ejectForm2.control} name="githubOwner" render={({ field }) => (

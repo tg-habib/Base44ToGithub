@@ -32,6 +32,10 @@ interface RepoInfo {
   size: number;
 }
 
+interface ContentsResponse {
+  commit: { sha: string; html_url: string };
+}
+
 const GH_HEADERS = (token: string) => ({
   Authorization: `Bearer ${token}`,
   Accept: "application/vnd.github+json",
@@ -118,17 +122,47 @@ async function pushToExistingBranch(params: {
   return { commitUrl: newCommit.html_url, filesCount: files.length };
 }
 
-interface ContentsResponse {
-  commit: { sha: string; html_url: string };
+/**
+ * GitHub returns 409 "Git Repository is empty" for ALL git data API calls
+ * (blobs, trees, commits) on repos that have never had a single commit.
+ * Work around this by first seeding the repo via the Contents API (the only
+ * API that works on truly empty repos), then doing the full bulk push via
+ * the Git Data API on top of that seed commit — giving one final commit.
+ */
+async function seedEmptyRepoAndPush(params: {
+  base: string;
+  token: string;
+  branch: string;
+  commitMessage: string;
+  files: GitHubFile[];
+}): Promise<{ commitUrl: string; filesCount: number }> {
+  const { base, token, branch, commitMessage, files } = params;
+
+  const seedFile = files[0];
+
+  const initResponse = await githubRequest<ContentsResponse>(
+    "PUT",
+    `${base}/contents/${seedFile.path}`,
+    token,
+    {
+      message: "chore: initialise repository",
+      content: Buffer.from(seedFile.content).toString("base64"),
+      branch,
+    },
+  );
+
+  const initSha = initResponse.commit.sha;
+
+  return pushToExistingBranch({
+    base,
+    token,
+    branch,
+    commitMessage,
+    files,
+    branchSha: initSha,
+  });
 }
 
-/**
- * GitHub's Git Data API (blobs/trees/commits) returns 409 on completely empty
- * repositories that have never had a single commit. Work around this by using
- * the Contents API to create one file first (which initialises the repo and
- * creates the branch), then do the bulk push via the Git Data API on top of
- * that initial commit.
- */
 async function pushAsInitialCommit(params: {
   base: string;
   token: string;
@@ -138,32 +172,31 @@ async function pushAsInitialCommit(params: {
 }): Promise<{ commitUrl: string; filesCount: number }> {
   const { base, token, branch, commitMessage, files } = params;
 
-  // Step 1 — seed the repo with the first file via the Contents API.
-  // This is the only API that works on a repo with zero commits.
-  const seedFile = files[0];
-  const seedResponse = await githubRequest<ContentsResponse>(
-    "PUT",
-    `${base}/contents/${seedFile.path}`,
-    token,
-    {
-      message: `chore: initialise repository`,
-      content: Buffer.from(seedFile.content).toString("base64"),
-      branch,
-    },
-  );
+  try {
+    const blobs = await createBlobs(base, token, files);
 
-  const initSha = seedResponse.commit.sha;
+    const tree = await githubRequest<GitTree>("POST", `${base}/git/trees`, token, {
+      tree: blobs,
+    });
 
-  // Step 2 — push ALL files (including the seed file) via the Git Data API
-  // in a single commit, so the user ends up with one clean commit.
-  return pushToExistingBranch({
-    base,
-    token,
-    branch,
-    commitMessage,
-    files,
-    branchSha: initSha,
-  });
+    const newCommit = await githubRequest<NewCommit>("POST", `${base}/git/commits`, token, {
+      message: commitMessage,
+      tree: tree.sha,
+      parents: [],
+    });
+
+    await githubRequest("POST", `${base}/git/refs`, token, {
+      ref: `refs/heads/${branch}`,
+      sha: newCommit.sha,
+    });
+
+    return { commitUrl: newCommit.html_url, filesCount: files.length };
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("409")) {
+      return seedEmptyRepoAndPush({ base, token, branch, commitMessage, files });
+    }
+    throw err;
+  }
 }
 
 export async function pushFilesToGitHub(params: {
@@ -197,7 +230,7 @@ export async function pushFilesToGitHub(params: {
   }
 
   if (repoInfo.size === 0) {
-    return pushAsInitialCommit({ base, token, branch, commitMessage, files });
+    return seedEmptyRepoAndPush({ base, token, branch, commitMessage, files });
   }
 
   const defaultRef = await githubGet<GitRef>(
