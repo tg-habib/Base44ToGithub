@@ -352,79 +352,78 @@ export default function Home() {
     defaultValues: { githubToken: "", githubOwner: "", githubRepo: "", branch: "main", commitMessage: "feat: eject from Base44" },
   });
 
-  /* ── GitHub OAuth Device Flow — state backed by sessionStorage so it
-        survives page reloads when the user switches apps to approve on GitHub ── */
+  /* ── GitHub OAuth (web redirect flow) ── */
   type GhSession = { token: string; login: string; avatar_url: string };
-  type DeviceFlowState = { user_code: string; verification_uri: string; device_code: string; interval: number };
 
-  function readStorage<T>(key: string): T | null {
+  function ssGet<T>(key: string): T | null {
     try { return JSON.parse(sessionStorage.getItem(key) ?? "null") as T; } catch { return null; }
   }
-  function writeStorage(key: string, value: unknown) {
+  function ssSet(key: string, value: unknown) {
     try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* noop */ }
   }
-  function clearStorage(key: string) {
+  function ssDel(key: string) {
     try { sessionStorage.removeItem(key); } catch { /* noop */ }
   }
 
-  const [ghSession, setGhSessionRaw] = useState<GhSession | null>(() => readStorage<GhSession>("gh_session"));
-  const [deviceFlow, setDeviceFlowRaw] = useState<DeviceFlowState | null>(() => readStorage<DeviceFlowState>("gh_device_flow"));
-  const [devicePolling, setDevicePolling] = useState<boolean>(() => readStorage<DeviceFlowState>("gh_device_flow") !== null);
+  const [ghSession, setGhSessionRaw] = useState<GhSession | null>(() => ssGet<GhSession>("gh_session"));
+  const [ghConnecting, setGhConnecting] = useState(false);
   const [useManualToken, setUseManualToken] = useState(false);
 
   const setGhSession = (s: GhSession | null) => {
     setGhSessionRaw(s);
-    if (s) writeStorage("gh_session", s); else clearStorage("gh_session");
+    if (s) ssSet("gh_session", s); else ssDel("gh_session");
   };
-  const setDeviceFlow = (f: DeviceFlowState | null) => {
-    setDeviceFlowRaw(f);
-    if (f) writeStorage("gh_device_flow", f); else clearStorage("gh_device_flow");
-  };
+
+  /* On mount: handle the ?code= callback from GitHub */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const returnedState = params.get("state");
+    if (!code) return;
+
+    // Clean the URL immediately so a refresh doesn't re-submit
+    window.history.replaceState({}, "", window.location.pathname);
+
+    // CSRF check
+    const savedState = sessionStorage.getItem("gh_oauth_state");
+    ssDel("gh_oauth_state");
+    if (returnedState && savedState && returnedState !== savedState) {
+      toast({ title: "GitHub auth failed", description: "State mismatch — please try again.", variant: "destructive" });
+      return;
+    }
+
+    setGhConnecting(true);
+    fetch("/api/auth/exchange", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, redirect_uri: window.location.origin + window.location.pathname }),
+    })
+      .then(r => r.json())
+      .then((data: { token?: string; login?: string; avatar_url?: string; error?: string; error_description?: string }) => {
+        if (data.token) {
+          setGhSession({ token: data.token, login: data.login ?? "", avatar_url: data.avatar_url ?? "" });
+        } else {
+          toast({ title: "GitHub auth failed", description: data.error_description ?? data.error ?? "Unknown error", variant: "destructive" });
+        }
+      })
+      .catch(() => toast({ title: "GitHub auth failed", description: "Could not reach the server.", variant: "destructive" }))
+      .finally(() => setGhConnecting(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (ghSession) ejectForm2.setValue("githubToken", ghSession.token);
   }, [ghSession, ejectForm2]);
 
-  useEffect(() => {
-    if (!devicePolling || !deviceFlow) return;
-    const id = setInterval(async () => {
-      try {
-        const res = await fetch("/api/auth/device/poll", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ device_code: deviceFlow.device_code }),
-        });
-        const data = await res.json() as { status: string; token?: string; login?: string; avatar_url?: string; error?: string; error_description?: string };
-        if (data.status === "success" && data.token) {
-          setGhSession({ token: data.token, login: data.login ?? "", avatar_url: data.avatar_url ?? "" });
-          setDeviceFlow(null);
-          setDevicePolling(false);
-        } else if (data.status === "expired" || data.status === "denied") {
-          setDeviceFlow(null);
-          setDevicePolling(false);
-          toast({ title: `GitHub auth ${data.status}`, description: "Please try connecting again.", variant: "destructive" });
-        } else if (data.status === "error") {
-          setDeviceFlow(null);
-          setDevicePolling(false);
-          toast({
-            title: "GitHub auth failed",
-            description: data.error_description ?? data.error ?? "Unexpected error from GitHub. Make sure GITHUB_CLIENT_SECRET is set in Replit secrets.",
-            variant: "destructive",
-          });
-        }
-      } catch { /* noop */ }
-    }, (deviceFlow.interval || 5) * 1000);
-    return () => clearInterval(id);
-  }, [devicePolling, deviceFlow]);
-
-  const startDeviceFlow = async () => {
+  const startWebFlow = async () => {
     try {
-      const res = await fetch("/api/auth/device/start", { method: "POST", headers: { "Content-Type": "application/json" } });
-      const data = await res.json() as { device_code?: string; user_code?: string; verification_uri?: string; interval?: number; error?: string };
-      if (!res.ok || data.error) throw new Error(data.error ?? "Failed to start device flow");
-      const flow: DeviceFlowState = { device_code: data.device_code!, user_code: data.user_code!, verification_uri: data.verification_uri!, interval: data.interval ?? 5 };
-      setDeviceFlow(flow);
-      setDevicePolling(true);
+      const state = crypto.randomUUID();
+      sessionStorage.setItem("gh_oauth_state", state);
+      const redirectUri = window.location.origin + window.location.pathname;
+      const res = await fetch(`/api/auth/web/start?state=${encodeURIComponent(state)}&redirect_uri=${encodeURIComponent(redirectUri)}`);
+      const data = await res.json() as { url?: string; error?: string };
+      if (!res.ok || !data.url) throw new Error(data.error ?? "Failed to start GitHub auth");
+      window.location.href = data.url;
     } catch (err) {
       toast({ title: "GitHub connection failed", description: err instanceof Error ? err.message : "Unknown error", variant: "destructive" });
     }
@@ -432,8 +431,6 @@ export default function Home() {
 
   const disconnectGitHub = () => {
     setGhSession(null);
-    setDeviceFlow(null);
-    setDevicePolling(false);
     setUseManualToken(false);
     ejectForm2.setValue("githubToken", "");
   };
@@ -712,8 +709,13 @@ export default function Home() {
                     <div className="p-5">
                       <Form {...ejectForm2}>
                         <form id="eject-step2-form" onSubmit={ejectForm2.handleSubmit(onEjectStep2Submit)} className="space-y-4">
-                          {/* ── GitHub auth: device flow or manual token ── */}
-                          {ghSession && !useManualToken ? (
+                          {/* ── GitHub auth ── */}
+                          {ghConnecting ? (
+                            <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
+                              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0" />
+                              <p className="text-xs text-muted-foreground">Completing GitHub sign-in…</p>
+                            </div>
+                          ) : ghSession && !useManualToken ? (
                             <div className="flex items-center gap-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
                               <img src={ghSession.avatar_url} alt={ghSession.login} className="w-7 h-7 rounded-full shrink-0" />
                               <div className="flex-1 min-w-0">
@@ -725,39 +727,9 @@ export default function Home() {
                                 Disconnect
                               </button>
                             </div>
-                          ) : deviceFlow ? (
-                            <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
-                              <div className="flex items-center gap-2">
-                                <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-600 shrink-0" />
-                                <p className="text-xs font-semibold text-amber-800">Waiting for GitHub authorization…</p>
-                              </div>
-                              <div className="text-center">
-                                <p className="text-xs text-amber-700 mb-2">
-                                  1. Open{" "}
-                                  <a href={deviceFlow.verification_uri} target="_blank" rel="noreferrer"
-                                    className="font-semibold underline underline-offset-2">
-                                    github.com/login/device
-                                  </a>
-                                </p>
-                                <p className="text-xs text-amber-700 mb-2">2. Enter this code:</p>
-                                <div className="flex items-center gap-2 justify-center">
-                                  <code className="text-xl font-mono font-bold tracking-widest text-amber-900 bg-amber-100 px-4 py-2 rounded-lg border border-amber-300">
-                                    {deviceFlow.user_code}
-                                  </code>
-                                  <button type="button" onClick={() => navigator.clipboard.writeText(deviceFlow.user_code)}
-                                    className="p-1.5 rounded-md hover:bg-amber-200 transition-colors" title="Copy code">
-                                    <Copy className="h-3.5 w-3.5 text-amber-700" />
-                                  </button>
-                                </div>
-                              </div>
-                              <button type="button" onClick={() => { setDeviceFlow(null); setDevicePolling(false); }}
-                                className="text-xs text-amber-700 hover:text-amber-900 underline underline-offset-2 w-full text-center">
-                                Cancel
-                              </button>
-                            </div>
                           ) : (
                             <div className="space-y-2">
-                              <Button type="button" variant="outline" className="w-full gap-2 border-[#24292f] text-[#24292f] hover:bg-[#24292f] hover:text-white transition-colors" onClick={startDeviceFlow}>
+                              <Button type="button" variant="outline" className="w-full gap-2 border-[#24292f] text-[#24292f] hover:bg-[#24292f] hover:text-white transition-colors" onClick={startWebFlow}>
                                 <Github className="h-4 w-4" />
                                 Connect GitHub
                               </Button>

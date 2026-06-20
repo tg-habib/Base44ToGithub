@@ -165,4 +165,93 @@ router.post("/auth/device/poll", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /auth/web/start?redirect_uri=...&state=...
+ * Returns the GitHub authorize URL for the standard web OAuth flow.
+ * The frontend redirects the user there; GitHub sends them back to redirect_uri.
+ */
+router.get("/auth/web/start", (req: Request, res: Response) => {
+  if (!CLIENT_ID) {
+    res.status(503).json({ error: "GitHub OAuth is not configured." });
+    return;
+  }
+
+  const { redirect_uri, state } = req.query as { redirect_uri?: string; state?: string };
+
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    scope: "repo",
+    ...(state ? { state } : {}),
+    ...(redirect_uri ? { redirect_uri } : {}),
+  });
+
+  res.json({ url: `https://github.com/login/oauth/authorize?${params.toString()}` });
+});
+
+/**
+ * POST /auth/exchange
+ * Exchanges a one-time authorization code (from the OAuth callback) for an access token.
+ * Body: { code: string, redirect_uri?: string }
+ */
+router.post("/auth/exchange", async (req: Request, res: Response) => {
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    res.status(503).json({ error: "GitHub OAuth is not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET." });
+    return;
+  }
+
+  const { code, redirect_uri } = req.body as { code?: string; redirect_uri?: string };
+  if (!code || typeof code !== "string") {
+    res.status(400).json({ error: "code is required" });
+    return;
+  }
+
+  try {
+    const body: Record<string, string> = {
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      code,
+    };
+    if (redirect_uri) body.redirect_uri = redirect_uri;
+
+    const r = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const data = (await r.json()) as {
+      access_token?: string;
+      error?: string;
+      error_description?: string;
+    };
+
+    logger.info({ hasToken: !!data.access_token, error: data.error }, "GitHub exchange response");
+
+    if (!data.access_token) {
+      res.status(400).json({
+        error: data.error ?? "exchange_failed",
+        error_description: data.error_description ?? "GitHub did not return an access token.",
+      });
+      return;
+    }
+
+    let login = "";
+    let avatar_url = "";
+    try {
+      const userRes = await fetch("https://api.github.com/user", {
+        headers: { Authorization: `Bearer ${data.access_token}`, Accept: "application/vnd.github+json" },
+      });
+      if (userRes.ok) {
+        const user = (await userRes.json()) as { login: string; avatar_url: string };
+        login = user.login;
+        avatar_url = user.avatar_url;
+      }
+    } catch { /* noop */ }
+
+    res.json({ token: data.access_token, login, avatar_url });
+  } catch {
+    res.status(500).json({ error: "Failed to exchange authorization code" });
+  }
+});
+
 export default router;
