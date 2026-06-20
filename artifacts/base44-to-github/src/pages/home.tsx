@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -9,7 +9,6 @@ import { useToast } from "@/hooks/use-toast";
 import {
   usePreviewBase44Files,
   usePushToGithub,
-  useEjectAndPush,
 } from "@workspace/api-client-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -64,6 +63,97 @@ const githubSchema = z.object({
   branch: z.string().min(1).default("main"),
   commitMessage: z.string().min(1).default("chore: sync from Base44"),
 });
+
+/* ── SSE streaming hook ── */
+
+type StreamState =
+  | { status: "idle" }
+  | { status: "running"; logs: string[] }
+  | { status: "done"; logs: string[]; commitUrl: string; filesCount: number }
+  | { status: "error"; logs: string[]; message: string };
+
+function useEjectStream() {
+  const [state, setState] = useState<StreamState>({ status: "idle" });
+  const abortRef = useRef<AbortController | null>(null);
+
+  const run = async (payload: z.infer<typeof ejectStep1Schema> & z.infer<typeof ejectStep2Schema>) => {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+
+    setState({ status: "running", logs: [] });
+
+    try {
+      const res = await fetch("/api/eject/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: ac.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        const text = await res.text();
+        let msg = text;
+        try { msg = JSON.parse(text).error ?? text; } catch { /* noop */ }
+        setState({ status: "error", logs: [], message: msg });
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const logs: string[] = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const chunk of parts) {
+          const lines = chunk.split("\n");
+          let eventName = "";
+          let dataLine = "";
+          for (const l of lines) {
+            if (l.startsWith("event: ")) eventName = l.slice(7).trim();
+            if (l.startsWith("data: ")) dataLine = l.slice(6);
+          }
+          if (!dataLine) continue;
+          let parsed: Record<string, unknown>;
+          try { parsed = JSON.parse(dataLine); } catch { continue; }
+
+          if (eventName === "log") {
+            const line = String(parsed.line ?? "");
+            logs.push(line);
+            setState({ status: "running", logs: [...logs] });
+          } else if (eventName === "result") {
+            setState({
+              status: "done",
+              logs: [...logs],
+              commitUrl: String(parsed.commitUrl ?? ""),
+              filesCount: Number(parsed.filesCount ?? 0),
+            });
+          } else if (eventName === "error") {
+            setState({ status: "error", logs: [...logs], message: String(parsed.message ?? "Unknown error") });
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as { name?: string }).name === "AbortError") return;
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setState(prev => ({ status: "error", logs: prev.status === "running" ? prev.logs : [], message: msg }));
+    }
+  };
+
+  const reset = () => {
+    abortRef.current?.abort();
+    setState({ status: "idle" });
+  };
+
+  return { state, run, reset };
+}
 
 /* ── Small shared components ── */
 
@@ -182,6 +272,56 @@ function StepBadge({ current }: { current: 1 | 2 }) {
   );
 }
 
+/* ── Live terminal panel ── */
+
+function LiveTerminal({ logs, running }: { logs: string[]; running: boolean }) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs.length]);
+
+  return (
+    <div className="rounded-xl border border-border overflow-hidden">
+      {/* Terminal title bar */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-zinc-900 border-b border-zinc-700">
+        <div className="flex gap-1.5">
+          <div className="w-3 h-3 rounded-full bg-red-500/70" />
+          <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+          <div className="w-3 h-3 rounded-full bg-green-500/70" />
+        </div>
+        <div className="flex-1 flex items-center justify-center gap-2">
+          <Terminal className="h-3 w-3 text-zinc-400" />
+          <span className="text-xs text-zinc-400 font-mono">base44 eject</span>
+        </div>
+        {running && <Loader2 className="h-3 w-3 animate-spin text-zinc-400" />}
+      </div>
+
+      {/* Log output */}
+      <div className="bg-zinc-950 h-56 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
+        {logs.length === 0 ? (
+          <span className="text-zinc-600">Waiting for output…</span>
+        ) : (
+          logs.map((line, i) => (
+            <div key={i} className={
+              line.startsWith("✓") ? "text-emerald-400" :
+              line.startsWith("▶") ? "text-sky-400" :
+              line.startsWith("✗") || line.toLowerCase().includes("error") ? "text-red-400" :
+              "text-zinc-300"
+            }>
+              {line || <>&nbsp;</>}
+            </div>
+          ))
+        )}
+        {running && (
+          <div className="text-zinc-500 animate-pulse">█</div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+
 /* ── Tabs ── */
 
 type Tab = "eject" | "manual" | "metadata";
@@ -190,10 +330,10 @@ export default function Home() {
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("eject");
 
-  /* ── Eject state — two separate forms, one per step ── */
+  /* ── Eject state — two forms + SSE stream ── */
   const [ejectStep, setEjectStep] = useState<1 | 2>(1);
   const [ejectStep1Data, setEjectStep1Data] = useState<z.infer<typeof ejectStep1Schema> | null>(null);
-  const [ejectResult, setEjectResult] = useState<{ url: string; count: number; logs?: string } | null>(null);
+  const { state: streamState, run: runStream, reset: resetStream } = useEjectStream();
 
   const ejectForm1 = useForm<z.infer<typeof ejectStep1Schema>>({
     resolver: zodResolver(ejectStep1Schema),
@@ -205,8 +345,6 @@ export default function Home() {
     defaultValues: { githubToken: "", githubOwner: "", githubRepo: "", branch: "main", commitMessage: "feat: eject from Base44" },
   });
 
-  const ejectMutation = useEjectAndPush();
-
   const onEjectStep1Submit = (values: z.infer<typeof ejectStep1Schema>) => {
     setEjectStep1Data(values);
     setEjectStep(2);
@@ -214,33 +352,22 @@ export default function Home() {
 
   const onEjectStep2Submit = (values: z.infer<typeof ejectStep2Schema>) => {
     if (!ejectStep1Data) return;
-    const payload = { ...ejectStep1Data, ...values };
-    ejectMutation.mutate(
-      { data: payload },
-      {
-        onSuccess: (data) => {
-          if (data.success) {
-            setEjectResult({ url: data.commitUrl, count: data.filesCount, logs: data.logs ?? undefined });
-          } else {
-            toast({ title: "Eject failed", description: data.message, variant: "destructive" });
-          }
-        },
-        onError: (err: unknown) => {
-          const msg = (err as { error?: string })?.error ?? "Something went wrong.";
-          toast({ title: "Eject failed", description: msg, variant: "destructive" });
-        },
-      }
-    );
+    runStream({ ...ejectStep1Data, ...values });
   };
 
   const resetEject = () => {
-    setEjectResult(null);
+    resetStream();
     setEjectStep(1);
     setEjectStep1Data(null);
     ejectForm1.reset();
     ejectForm2.reset();
-    ejectMutation.reset();
   };
+
+  const isRunning = streamState.status === "running";
+  const isDone = streamState.status === "done";
+  const isError = streamState.status === "error";
+  const showTerminal = streamState.status === "running" || streamState.status === "done" || streamState.status === "error";
+  const logs = showTerminal ? streamState.logs : [];
 
   /* ── Metadata push state ── */
   const [metaStep, setMetaStep] = useState<1 | 2 | 3>(1);
@@ -326,9 +453,9 @@ export default function Home() {
           ))}
         </div>
 
-        {/* ═══════════════════════════════════════════════
+        {/* ══════════════════════════════════════════
             TAB: EJECT FULL CODE
-        ═══════════════════════════════════════════════ */}
+        ══════════════════════════════════════════ */}
         {tab === "eject" && (
           <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
 
@@ -343,41 +470,81 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Success screen */}
-            {ejectResult ? (
+            {/* ── Success screen ── */}
+            {isDone && streamState.status === "done" && (
               <Card>
-                <div className="p-10 flex flex-col items-center text-center gap-5">
+                <div className="p-8 flex flex-col items-center text-center gap-5">
                   <div className="w-16 h-16 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-center">
                     <CheckCircle2 className="h-8 w-8 text-emerald-600" />
                   </div>
-                  <div className="space-y-1.5">
+                  <div className="space-y-1">
                     <h2 className="text-xl font-bold text-foreground">Eject successful!</h2>
                     <p className="text-muted-foreground text-sm">
-                      {ejectResult.count} file{ejectResult.count !== 1 ? "s" : ""} pushed to GitHub.
+                      {streamState.filesCount} file{streamState.filesCount !== 1 ? "s" : ""} pushed to GitHub.
                     </p>
                   </div>
-                  <a href={ejectResult.url} target="_blank" rel="noreferrer"
+                  <a href={streamState.commitUrl} target="_blank" rel="noreferrer"
                     className="inline-flex items-center gap-2.5 px-5 py-2.5 bg-foreground text-background rounded-lg text-sm font-medium hover:opacity-90 transition-opacity">
                     <Github className="h-4 w-4" />
                     View commit on GitHub
                     <ExternalLink className="h-3.5 w-3.5 opacity-60" />
                   </a>
-                  {ejectResult.logs && (
-                    <details className="w-full text-left">
-                      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">View CLI logs</summary>
-                      <pre className="mt-2 text-xs bg-muted rounded-lg p-3 overflow-auto max-h-40 whitespace-pre-wrap text-muted-foreground">{ejectResult.logs}</pre>
-                    </details>
-                  )}
-                  <button onClick={resetEject} className="text-xs text-muted-foreground hover:text-foreground transition-colors mt-1">
+                  <div className="w-full">
+                    <LiveTerminal logs={logs} running={false} />
+                  </div>
+                  <button onClick={resetEject} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
                     Eject another app
                   </button>
                 </div>
               </Card>
-            ) : (
+            )}
+
+            {/* ── Error screen ── */}
+            {isError && streamState.status === "error" && (
+              <Card>
+                <div className="p-6 space-y-4">
+                  <div className="flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl p-4">
+                    <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-semibold text-red-800">Eject failed</p>
+                      <p className="text-xs text-red-700 mt-0.5 leading-relaxed">{streamState.message}</p>
+                    </div>
+                  </div>
+                  {logs.length > 0 && <LiveTerminal logs={logs} running={false} />}
+                  <div className="flex gap-3 pt-1">
+                    <Button variant="outline" onClick={() => { resetStream(); }}>
+                      Try again
+                    </Button>
+                    <Button variant="outline" onClick={resetEject}>
+                      Start over
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {/* ── Running screen (terminal only, form stays visible but locked) ── */}
+            {isRunning && (
+              <Card>
+                <div className="p-5 space-y-4">
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="h-5 w-5 animate-spin text-primary shrink-0" />
+                    <div>
+                      <p className="text-sm font-semibold text-foreground">Ejecting your app…</p>
+                      <p className="text-xs text-muted-foreground">This takes 30–90 seconds.</p>
+                    </div>
+                  </div>
+                  <LiveTerminal logs={logs} running={true} />
+                </div>
+              </Card>
+            )}
+
+            {/* ── Forms (hidden while running/done/error) ── */}
+            {!isRunning && !isDone && !isError && (
               <>
                 <StepBadge current={ejectStep} />
 
-                {/* ── Step 1: Base44 credentials ── */}
+                {/* Step 1: Base44 credentials */}
                 {ejectStep === 1 && (
                   <Card>
                     <div className="p-5 border-b border-border">
@@ -395,11 +562,7 @@ export default function Home() {
                     </div>
                     <div className="p-5">
                       <Form {...ejectForm1}>
-                        <form
-                          id="eject-step1-form"
-                          onSubmit={ejectForm1.handleSubmit(onEjectStep1Submit)}
-                          className="space-y-5"
-                        >
+                        <form id="eject-step1-form" onSubmit={ejectForm1.handleSubmit(onEjectStep1Submit)} className="space-y-5">
                           <FormField control={ejectForm1.control} name="base44AppId" render={({ field }) => (
                             <FormItem>
                               <div className="flex items-center justify-between">
@@ -441,7 +604,7 @@ export default function Home() {
                   </Card>
                 )}
 
-                {/* ── Step 2: GitHub destination ── */}
+                {/* Step 2: GitHub destination */}
                 {ejectStep === 2 && (
                   <Card>
                     <div className="p-5 border-b border-border">
@@ -455,13 +618,9 @@ export default function Home() {
                         </div>
                       </div>
                     </div>
-                    <div className="p-5 space-y-5">
+                    <div className="p-5">
                       <Form {...ejectForm2}>
-                        <form
-                          id="eject-step2-form"
-                          onSubmit={ejectForm2.handleSubmit(onEjectStep2Submit)}
-                          className="space-y-5"
-                        >
+                        <form id="eject-step2-form" onSubmit={ejectForm2.handleSubmit(onEjectStep2Submit)} className="space-y-5">
                           <FormField control={ejectForm2.control} name="githubToken" render={({ field }) => (
                             <FormItem>
                               <div className="flex items-center justify-between">
@@ -511,31 +670,13 @@ export default function Home() {
                           </div>
                         </form>
                       </Form>
-
-                      {ejectMutation.isPending && (
-                        <div className="flex flex-col items-center gap-3 py-4 text-center border border-primary/20 bg-primary/5 rounded-xl">
-                          <Loader2 className="h-7 w-7 animate-spin text-primary" />
-                          <div>
-                            <p className="text-sm font-medium text-foreground">Ejecting your app…</p>
-                            <p className="text-xs text-muted-foreground mt-1">
-                              Running <code className="bg-muted px-1 rounded">npx base44 eject</code> on the server. This takes 30–90 seconds.
-                            </p>
-                          </div>
-                        </div>
-                      )}
                     </div>
                     <div className="p-4 border-t border-border bg-muted/30 rounded-b-xl flex items-center justify-between gap-3">
-                      <Button variant="outline" onClick={() => setEjectStep(1)} disabled={ejectMutation.isPending}>
+                      <Button variant="outline" onClick={() => setEjectStep(1)}>
                         <ArrowLeft className="mr-2 h-4 w-4" /> Back
                       </Button>
-                      <Button
-                        type="submit"
-                        form="eject-step2-form"
-                        disabled={ejectMutation.isPending}
-                      >
-                        {ejectMutation.isPending
-                          ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Ejecting…</>
-                          : <><Terminal className="mr-2 h-4 w-4" />Eject &amp; Push</>}
+                      <Button type="submit" form="eject-step2-form">
+                        <Terminal className="mr-2 h-4 w-4" />Eject &amp; Push
                       </Button>
                     </div>
                   </Card>
@@ -543,7 +684,6 @@ export default function Home() {
               </>
             )}
 
-            {/* Info box */}
             <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
               <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
               <p className="text-xs text-amber-800 leading-relaxed">
@@ -555,9 +695,9 @@ export default function Home() {
           </div>
         )}
 
-        {/* ═══════════════════════════════════════════════
+        {/* ══════════════════════════════════════════
             TAB: MANUAL METHODS
-        ═══════════════════════════════════════════════ */}
+        ══════════════════════════════════════════ */}
         {tab === "manual" && (
           <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className="flex items-start gap-2.5 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
@@ -583,7 +723,8 @@ export default function Home() {
                     Base44 Downloader — Chrome Web Store <ExternalLink className="h-3.5 w-3.5" />
                   </a>
                   <p className="text-xs text-muted-foreground">
-                    Alternative: <a href="https://chromewebstore.google.com/detail/vibeapp-exporter-base44-d/ccmjgcjhglnfahjppjinaegigjoabjjb"
+                    Alternative:{" "}
+                    <a href="https://chromewebstore.google.com/detail/vibeapp-exporter-base44-d/ccmjgcjhglnfahjppjinaegigjoabjjb"
                       target="_blank" rel="noreferrer" className="text-primary hover:underline">VibeApp Exporter</a> — exports Base44, Lovable, and Bolt.
                   </p>
                 </div>
@@ -633,9 +774,9 @@ git push -u origin main`} />
           </div>
         )}
 
-        {/* ═══════════════════════════════════════════════
+        {/* ══════════════════════════════════════════
             TAB: SCHEMA & CONFIG (metadata push)
-        ═══════════════════════════════════════════════ */}
+        ══════════════════════════════════════════ */}
         {tab === "metadata" && (
           <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className="flex items-start gap-2.5 bg-blue-50 border border-blue-200 rounded-xl p-4">
