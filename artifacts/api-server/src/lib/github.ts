@@ -199,6 +199,39 @@ async function pushAsInitialCommit(params: {
   }
 }
 
+interface OwnerInfo {
+  type: "User" | "Organization";
+}
+
+/**
+ * Create a new GitHub repository for the given owner.
+ * Detects whether the owner is a user or org and calls the right endpoint.
+ */
+async function createGitHubRepo(params: {
+  token: string;
+  owner: string;
+  repo: string;
+}): Promise<void> {
+  const { token, owner, repo } = params;
+
+  const ownerInfo = await githubGet<OwnerInfo>(
+    `https://api.github.com/users/${owner}`,
+    token,
+  );
+
+  const isOrg = ownerInfo?.type === "Organization";
+
+  const endpoint = isOrg
+    ? `https://api.github.com/orgs/${owner}/repos`
+    : `https://api.github.com/user/repos`;
+
+  await githubRequest("POST", endpoint, token, {
+    name: repo,
+    private: false,
+    auto_init: false,
+  });
+}
+
 export async function pushFilesToGitHub(params: {
   token: string;
   owner: string;
@@ -206,15 +239,19 @@ export async function pushFilesToGitHub(params: {
   branch: string;
   commitMessage: string;
   files: GitHubFile[];
+  onLog?: (msg: string) => void;
 }): Promise<{ commitUrl: string; filesCount: number }> {
-  const { token, owner, repo, branch, commitMessage, files } = params;
+  const { token, owner, repo, branch, commitMessage, files, onLog } = params;
   const base = `https://api.github.com/repos/${owner}/${repo}`;
 
-  const repoInfo = await githubGet<RepoInfo>(base, token);
+  let repoInfo = await githubGet<RepoInfo>(base, token);
+
   if (!repoInfo) {
-    throw new Error(
-      `Repository "${owner}/${repo}" not found. Make sure it exists on GitHub and your token has access to it.`,
-    );
+    onLog?.(`▶ Repository not found — creating ${owner}/${repo} on GitHub…`);
+    await createGitHubRepo({ token, owner, repo });
+    onLog?.(`✓ Repository ${owner}/${repo} created`);
+    // After creation the repo is always empty, skip re-fetching
+    return seedEmptyRepoAndPush({ base, token, branch, commitMessage, files });
   }
 
   const branchRef = await githubGet<GitRef>(

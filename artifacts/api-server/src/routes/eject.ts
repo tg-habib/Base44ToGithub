@@ -140,6 +140,7 @@ router.post("/eject/stream", async (req, res): Promise<void> => {
       branch,
       commitMessage,
       files,
+      onLog: sendLog,
     });
 
     sendLog(`✓ ${filesCount} file${filesCount !== 1 ? "s" : ""} committed to GitHub`);
