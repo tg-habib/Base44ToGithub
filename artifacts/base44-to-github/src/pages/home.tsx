@@ -32,8 +32,6 @@ import {
   ChevronUp,
   Zap,
   Database,
-  LogIn,
-  Shield,
 } from "lucide-react";
 import type { PreviewResult } from "@workspace/api-client-react/src/generated/api.schemas";
 
@@ -68,11 +66,9 @@ const githubSchema = z.object({
 
 /* ── SSE streaming hook ── */
 
-type AuthPrompt = { url: string; code: string };
-
 type StreamState =
   | { status: "idle" }
-  | { status: "running"; logs: string[]; auth: AuthPrompt | null }
+  | { status: "running"; logs: string[] }
   | { status: "done"; logs: string[]; commitUrl: string; filesCount: number }
   | { status: "error"; logs: string[]; message: string };
 
@@ -85,7 +81,7 @@ function useEjectStream() {
     const ac = new AbortController();
     abortRef.current = ac;
 
-    setState({ status: "running", logs: [], auth: null });
+    setState({ status: "running", logs: [] });
 
     try {
       const res = await fetch("/api/eject/stream", {
@@ -107,7 +103,6 @@ function useEjectStream() {
       const decoder = new TextDecoder();
       let buffer = "";
       const logs: string[] = [];
-      let authPrompt: AuthPrompt | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -132,13 +127,7 @@ function useEjectStream() {
           if (eventName === "log") {
             const line = String(parsed.line ?? "");
             logs.push(line);
-            setState({ status: "running", logs: [...logs], auth: authPrompt });
-          } else if (eventName === "auth") {
-            authPrompt = {
-              url: String(parsed.url ?? "https://app.base44.com/login/device"),
-              code: String(parsed.code ?? ""),
-            };
-            setState({ status: "running", logs: [...logs], auth: authPrompt });
+            setState({ status: "running", logs: [...logs] });
           } else if (eventName === "result") {
             setState({
               status: "done",
@@ -283,86 +272,6 @@ function StepBadge({ current }: { current: 1 | 2 }) {
   );
 }
 
-/* ── Auth banner shown when CLI needs device-code login ── */
-
-function AuthBanner({ auth }: { auth: AuthPrompt }) {
-  const [copied, setCopied] = useState(false);
-
-  const copyCode = () => {
-    if (auth.code) {
-      navigator.clipboard.writeText(auth.code);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
-  return (
-    <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4 space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
-      {/* Header */}
-      <div className="flex items-center gap-2.5">
-        <div className="w-8 h-8 bg-amber-100 border border-amber-300 rounded-lg flex items-center justify-center shrink-0">
-          <LogIn className="h-4 w-4 text-amber-700" />
-        </div>
-        <div>
-          <p className="text-sm font-bold text-amber-900">Action required: Authenticate with Base44</p>
-          <p className="text-xs text-amber-700 leading-relaxed">
-            The CLI needs you to log in once. Complete the steps below — the eject will continue automatically.
-          </p>
-        </div>
-      </div>
-
-      {/* Steps */}
-      <div className="space-y-2">
-        {/* Step 1: Copy code */}
-        {auth.code && (
-          <div className="flex items-center gap-3 bg-white border border-amber-200 rounded-lg px-3 py-2.5">
-            <div className="w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs font-bold shrink-0">1</div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs text-amber-800 font-medium">Your verification code</p>
-              <p className="text-lg font-mono font-bold text-amber-900 tracking-widest">{auth.code}</p>
-            </div>
-            <button
-              onClick={copyCode}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-md text-xs font-medium text-amber-800 transition-colors"
-            >
-              {copied
-                ? <><CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />Copied!</>
-                : <><Copy className="h-3.5 w-3.5" />Copy</>}
-            </button>
-          </div>
-        )}
-
-        {/* Step 2: Open URL */}
-        <div className="flex items-center gap-3 bg-white border border-amber-200 rounded-lg px-3 py-2.5">
-          <div className="w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs font-bold shrink-0">{auth.code ? "2" : "1"}</div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs text-amber-800 font-medium">Open this page and enter the code above</p>
-            <p className="text-xs text-amber-700 font-mono truncate">{auth.url}</p>
-          </div>
-          <a
-            href={auth.url}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-600 rounded-md text-xs font-medium text-white transition-colors shrink-0"
-          >
-            Open <ExternalLink className="h-3 w-3" />
-          </a>
-        </div>
-
-        {/* Step 3: Wait */}
-        <div className="flex items-center gap-3 bg-white border border-amber-200 rounded-lg px-3 py-2.5">
-          <div className="w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs font-bold shrink-0">{auth.code ? "3" : "2"}</div>
-          <div className="flex-1">
-            <p className="text-xs text-amber-800 font-medium">Return here after confirming</p>
-            <p className="text-xs text-amber-700">The eject will continue automatically once you approve. You have up to 5 minutes.</p>
-          </div>
-          <Loader2 className="h-4 w-4 animate-spin text-amber-500 shrink-0" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* ── Live terminal panel ── */
 
 function LiveTerminal({ logs, running }: { logs: string[]; running: boolean }) {
@@ -460,7 +369,6 @@ export default function Home() {
   const isError = streamState.status === "error";
   const showTerminal = streamState.status === "running" || streamState.status === "done" || streamState.status === "error";
   const logs = showTerminal ? streamState.logs : [];
-  const authPrompt = streamState.status === "running" ? streamState.auth : null;
 
   /* ── Metadata push state ── */
   const [metaStep, setMetaStep] = useState<1 | 2 | 3>(1);
@@ -557,8 +465,8 @@ export default function Home() {
               <div>
                 <p className="text-sm font-semibold text-foreground">How this works</p>
                 <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                  Runs <code className="bg-muted px-1 rounded">npx base44 eject</code> on the server, collects all React/JSX source files, and pushes them to GitHub in one commit.
-                  The <strong className="text-foreground">first run requires a one-time login</strong> — a verification code will appear and you'll click a link to confirm in your Base44 account. Subsequent runs are instant.
+                  Calls the Base44 API directly with your API key to download all source files — JSX pages, components, entities, config — then pushes them to GitHub in a single commit.
+                  <strong className="text-foreground"> No CLI, no login required.</strong> Takes ~5–15 seconds.
                 </p>
               </div>
             </div>
@@ -620,25 +528,14 @@ export default function Home() {
             {isRunning && (
               <Card>
                 <div className="p-5 space-y-4">
-                  {/* Auth banner — shown prominently when CLI needs device-code login */}
-                  {authPrompt ? (
-                    <AuthBanner auth={authPrompt} />
-                  ) : (
-                    <div className="flex items-center gap-3">
-                      <Loader2 className="h-5 w-5 animate-spin text-primary shrink-0" />
-                      <div>
-                        <p className="text-sm font-semibold text-foreground">Ejecting your app…</p>
-                        <p className="text-xs text-muted-foreground">Starting the Base44 CLI. If a login prompt appears, follow the steps shown below.</p>
-                      </div>
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="h-5 w-5 animate-spin text-primary shrink-0" />
+                    <div>
+                      <p className="text-sm font-semibold text-foreground">Fetching &amp; pushing your app…</p>
+                      <p className="text-xs text-muted-foreground">Downloading source from Base44 and committing to GitHub. Usually takes 5–15 seconds.</p>
                     </div>
-                  )}
+                  </div>
                   <LiveTerminal logs={logs} running={true} />
-                  {authPrompt && (
-                    <p className="text-xs text-muted-foreground text-center">
-                      <Loader2 className="inline h-3 w-3 animate-spin mr-1 align-middle" />
-                      Waiting for you to complete authentication… (up to 5 minutes)
-                    </p>
-                  )}
                 </div>
               </Card>
             )}
