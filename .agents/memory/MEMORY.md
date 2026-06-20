@@ -1,0 +1,4 @@
+- [GitHub OAuth App token exchange](github-oauth-secrets.md) — client_secret is required for the token exchange step; without it GitHub returns incorrect_client_credentials silently treated as pending.
+- [Empty repo push 409 fix](empty-repo-fix.md) — empty GitHub repos need Contents API seed before Git Data API bulk push; see seedEmptyRepoAndPush in github.ts.
+- [Vite proxy for dev API](vite-proxy.md) — /api/* calls from the Vite dev server (port 22191) must be proxied to localhost:8080; configured in artifacts/base44-to-github/vite.config.ts.
+- [OAuth callback URL constraint](oauth-callback-constraint.md) — GitHub OAuth web flow only redirects to registered callback URLs; dev URL needs to be added separately in GitHub OAuth App settings.
